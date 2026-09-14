@@ -1,0 +1,619 @@
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session
+from typing import List, Dict, Any
+from app.database import get_db
+from app.config import settings
+from app.models import Lab, User, Class, AuditLog
+from app.request_utils import get_client_ip
+from app.schemas import LabOut, LabCreate, LabUpdate, LabClone
+from app.security import require_lecturer, require_student, get_current_user, require_any_user
+
+router = APIRouter(prefix="/labs", tags=["Labs"])
+
+@router.get("/", response_model=List[LabOut])
+def get_all_labs(
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_lecturer)
+):
+    """API Lấy toàn bộ danh sách bài lab (Giảng viên/Admin)"""
+    if current_user.role == "lecturer":
+        class_ids = [c.id for c in current_user.classes]
+        return db.query(Lab).filter(Lab.class_id.in_(class_ids)).order_by(Lab.id.desc()).all()
+    return db.query(Lab).order_by(Lab.id.desc()).all()
+
+@router.get("/class/{class_id}", response_model=List[LabOut])
+def get_labs_by_class(
+    class_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_user)
+):
+    """API Lấy danh sách bài lab theo lớp học phần"""
+    if current_user.role == "student":
+        belongs = db.query(Class).filter(
+            Class.id == class_id, 
+            Class.users.any(id=current_user.id)
+        ).first()
+        if not belongs:
+            raise HTTPException(status_code=403, detail="Bạn không thuộc lớp học phần này")
+        return db.query(Lab).filter(Lab.class_id == class_id, Lab.is_active == True).order_by(Lab.id.desc()).all()
+    elif current_user.role == "lecturer":
+        belongs = db.query(Class).filter(
+            Class.id == class_id,
+            Class.users.any(id=current_user.id)
+        ).first()
+        if not belongs:
+            raise HTTPException(status_code=403, detail="Bạn không quản lý lớp học phần này")
+        return db.query(Lab).filter(Lab.class_id == class_id).order_by(Lab.id.desc()).all()
+    else: # admin
+        return db.query(Lab).filter(Lab.class_id == class_id).order_by(Lab.id.desc()).all()
+
+@router.get("/student/active", response_model=List[LabOut])
+def get_active_student_labs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_student)
+):
+    """API Lấy danh sách toàn bộ các bài lab đang hoạt động cho tất cả lớp của Sinh viên hiện tại"""
+    class_ids = [c.id for c in current_user.classes]
+    if not class_ids:
+        return []
+    return db.query(Lab).filter(
+        Lab.class_id.in_(class_ids), 
+        Lab.is_active == True
+    ).order_by(Lab.deadline.asc()).all()
+
+@router.get("/{lab_id}", response_model=LabOut)
+def get_lab_detail(
+    lab_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_user)
+):
+    """API Lấy thông tin chi tiết bài lab (bao gồm cấu trúc Form câu hỏi)"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+        
+    # Nếu sinh viên xem, kiểm tra quyền lớp học
+    if current_user.role == "student":
+        belongs = db.query(Class).filter(
+            Class.id == lab.class_id, 
+            Class.users.any(id=current_user.id)
+        ).first()
+        if not belongs:
+            raise HTTPException(status_code=403, detail="Bạn không thuộc lớp học phần chứa bài lab này")
+            
+    return lab
+
+@router.post("/", response_model=LabOut, status_code=status.HTTP_201_CREATED)
+def create_lab(
+    lab_data: LabCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Tạo bài tập Lab mới kèm thiết kế Form câu hỏi động (Giảng viên/Admin)"""
+    # Đảm bảo lớp học phần tồn tại
+    class_exists = db.query(Class).filter(Class.id == lab_data.class_id).first()
+    if not class_exists:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lớp học phần")
+        
+    if current_user.role == "lecturer" and current_user not in class_exists.users:
+        raise HTTPException(status_code=403, detail="Bạn không có quyền tạo bài lab cho lớp học phần này")
+
+    vm_username = (lab_data.vm_username or "").strip() or None
+    vm_password = lab_data.vm_password or None
+    if lab_data.enable_vm:
+        if lab_data.template_vmid is None or not (
+            settings.TEMPLATE_VMID_MIN
+            <= lab_data.template_vmid
+            <= settings.TEMPLATE_VMID_MAX
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "VM template phải nằm trong dải "
+                    f"{settings.TEMPLATE_VMID_MIN} - {settings.TEMPLATE_VMID_MAX}"
+                ),
+            )
+        if lab_data.vm_protocol in {"rdp", "ssh"} and not vm_username:
+            raise HTTPException(
+                status_code=422,
+                detail="RDP/SSH yêu cầu tên đăng nhập máy ảo",
+            )
+        if not vm_password:
+            raise HTTPException(
+                status_code=422,
+                detail="Vui lòng nhập mật khẩu kết nối máy ảo",
+            )
+        
+    new_lab = Lab(
+        title=lab_data.title,
+        description=lab_data.description,
+        grade_tag=lab_data.grade_tag.strip() if lab_data.grade_tag and lab_data.grade_tag.strip() else None,
+        form_fields=lab_data.form_fields,
+        deadline=lab_data.deadline,
+        late_policy=lab_data.late_policy,
+        individual_extensions=lab_data.individual_extensions,
+        class_id=lab_data.class_id,
+        created_by_id=current_user.id,
+        is_active=lab_data.is_active,
+        enable_vm=lab_data.enable_vm,
+        template_vmid=lab_data.template_vmid,
+        is_linked_clone=lab_data.is_linked_clone if lab_data.is_linked_clone is not None else True,
+        vm_protocol=lab_data.vm_protocol,
+        vm_port=lab_data.vm_port,
+        vm_username=vm_username,
+        vm_password=vm_password
+    )
+    db.add(new_lab)
+    db.commit()
+    db.refresh(new_lab)
+    
+    # Ghi log hoạt động
+    log = AuditLog(
+        user_id=current_user.id,
+        action="create_lab",
+        target=f"Created lab: {new_lab.title} (Class: {class_exists.name})",
+        ip_address=get_client_ip(request)
+    )
+    db.add(log)
+    db.commit()
+    
+    return new_lab
+
+@router.put("/{lab_id}", response_model=LabOut)
+def update_lab(
+    lab_id: int,
+    lab_data: LabUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Sửa đổi thông tin bài lab (Giảng viên/Admin)"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+        
+    if current_user.role == "lecturer":
+        class_exists = db.query(Class).filter(Class.id == lab.class_id).first()
+        if not class_exists or current_user not in class_exists.users:
+            raise HTTPException(status_code=403, detail="Bạn không quản lý lớp chứa bài lab này")
+            
+    if lab_data.title is not None:
+        lab.title = lab_data.title
+    if lab_data.description is not None:
+        lab.description = lab_data.description
+    if lab_data.grade_tag is not None:
+        lab.grade_tag = lab_data.grade_tag.strip() or None
+    if lab_data.form_fields is not None:
+        lab.form_fields = lab_data.form_fields
+    if lab_data.deadline is not None:
+        lab.deadline = lab_data.deadline
+    if lab_data.late_policy is not None:
+        lab.late_policy = lab_data.late_policy
+    if lab_data.individual_extensions is not None:
+        lab.individual_extensions = lab_data.individual_extensions
+    if lab_data.is_active is not None:
+        lab.is_active = lab_data.is_active
+    if lab_data.enable_vm is not None:
+        lab.enable_vm = lab_data.enable_vm
+    if lab_data.template_vmid is not None:
+        lab.template_vmid = lab_data.template_vmid
+    if lab_data.is_linked_clone is not None:
+        lab.is_linked_clone = lab_data.is_linked_clone
+    if lab_data.vm_protocol is not None:
+        lab.vm_protocol = lab_data.vm_protocol
+    if lab_data.vm_port is not None:
+        lab.vm_port = lab_data.vm_port
+    if lab_data.vm_username is not None:
+        lab.vm_username = lab_data.vm_username.strip() or None
+    if lab_data.vm_password is not None:
+        lab.vm_password = lab_data.vm_password
+    if lab_data.class_id is not None:
+
+        # Check class exists
+        class_exists = db.query(Class).filter(Class.id == lab_data.class_id).first()
+        if not class_exists:
+            raise HTTPException(status_code=404, detail="Không tìm thấy lớp học phần")
+        if current_user.role == "lecturer" and current_user not in class_exists.users:
+            raise HTTPException(status_code=403, detail="Bạn không quản lý lớp học phần mới này")
+        lab.class_id = lab_data.class_id
+
+    if lab.enable_vm:
+        if lab.template_vmid is None or not (
+            settings.TEMPLATE_VMID_MIN
+            <= lab.template_vmid
+            <= settings.TEMPLATE_VMID_MAX
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "VM template phải nằm trong dải "
+                    f"{settings.TEMPLATE_VMID_MIN} - {settings.TEMPLATE_VMID_MAX}"
+                ),
+            )
+        if lab.vm_protocol in {"rdp", "ssh"} and not lab.vm_username:
+            raise HTTPException(
+                status_code=422,
+                detail="RDP/SSH yêu cầu tên đăng nhập máy ảo",
+            )
+        if not lab.vm_password:
+            raise HTTPException(
+                status_code=422,
+                detail="Vui lòng nhập mật khẩu kết nối máy ảo",
+            )
+        
+    db.commit()
+    db.refresh(lab)
+    return lab
+
+@router.delete("/{lab_id}", status_code=status.HTTP_200_OK)
+def delete_lab(
+    lab_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Xóa bài lab (Giảng viên/Admin) - Tự động xóa file vật lý đính kèm và máy ảo sinh viên trên Proxmox"""
+    import os
+    from app.models import Submission
+    from app.services.vm_service import get_pve_client, control_student_vm
+
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+        
+    if current_user.role == "lecturer":
+        class_exists = db.query(Class).filter(Class.id == lab.class_id).first()
+        if not class_exists or current_user not in class_exists.users:
+            raise HTTPException(status_code=403, detail="Bạn không quản lý lớp chứa bài lab này")
+
+    # 1. Xóa sạch các file vật lý đính kèm của các bài nộp thuộc lab này
+    submissions = db.query(Submission).filter(Submission.lab_id == lab_id).all()
+    for sub in submissions:
+        attachments = sub.file_attachments or []
+        for att in attachments:
+            filepath = att.get("filepath")
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+
+    # 2. Thu dọn và xóa hoàn toàn các máy ảo (VM) sinh viên thuộc lab này trên Proxmox
+    proxmox = get_pve_client()
+    if proxmox:
+        try:
+            resources = proxmox.cluster.resources.get(type="vm")
+            for res in resources:
+                vm_name = res.get("name", "")
+                vmid = int(res.get("vmid", -1))
+                if vm_name == f"lab-{lab_id}" or vm_name.startswith(f"lab-{lab_id}-"):
+                    try:
+                        control_student_vm(vmid, "purge")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    db.delete(lab)
+    db.commit()
+    return {"message": "Xóa bài lab và thu dọn máy ảo, tệp đính kèm thành công"}
+
+@router.post("/{lab_id}/clone", response_model=LabOut, status_code=status.HTTP_201_CREATED)
+def clone_lab(
+    lab_id: int,
+    clone_data: LabClone,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Nhân bản bài lab sang lớp khác (Giảng viên/Admin)"""
+    source_lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not source_lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab gốc")
+
+    # Kiểm tra quyền với lớp nguồn (nếu là giảng viên)
+    if current_user.role == "lecturer":
+        source_class = db.query(Class).filter(Class.id == source_lab.class_id).first()
+        if not source_class or current_user not in source_class.users:
+            raise HTTPException(status_code=403, detail="Bạn không có quyền quản lý bài lab nguồn này")
+
+    # Kiểm tra lớp đích
+    target_class = db.query(Class).filter(Class.id == clone_data.target_class_id).first()
+    if not target_class:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lớp học phần đích")
+
+    if current_user.role == "lecturer" and current_user not in target_class.users:
+        raise HTTPException(status_code=403, detail="Bạn không có quyền giao bài cho lớp học phần đích này")
+
+    title = clone_data.new_title.strip() if clone_data.new_title and clone_data.new_title.strip() else f"{source_lab.title} (Bản sao)"
+    deadline = clone_data.new_deadline if clone_data.new_deadline else source_lab.deadline
+
+    # Tạo bản sao bài lab với dữ liệu cấu hình giống bài lab gốc
+    cloned_lab = Lab(
+        title=title,
+        description=source_lab.description,
+        grade_tag=clone_data.grade_tag if clone_data.grade_tag is not None else source_lab.grade_tag,
+        form_fields=source_lab.form_fields,
+        deadline=deadline,
+        late_policy=source_lab.late_policy,
+        individual_extensions={}, # Làm mới danh sách gia hạn cá nhân
+        class_id=clone_data.target_class_id,
+        created_by_id=current_user.id,
+        is_active=source_lab.is_active,
+        enable_vm=source_lab.enable_vm,
+        template_vmid=source_lab.template_vmid,
+        is_linked_clone=source_lab.is_linked_clone,
+        vm_protocol=source_lab.vm_protocol,
+        vm_port=source_lab.vm_port,
+        vm_username=source_lab.vm_username,
+        vm_password=source_lab.vm_password
+    )
+    db.add(cloned_lab)
+    db.commit()
+    db.refresh(cloned_lab)
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action="CLONE_LAB",
+        details=f"Nhân bản bài lab '{source_lab.title}' (ID {source_lab.id}) sang lớp '{target_class.name}' (ID {target_class.id}) thành '{cloned_lab.title}' (ID {cloned_lab.id})"
+    )
+    db.add(log)
+    db.commit()
+    return cloned_lab
+
+@router.post("/{lab_id}/extensions", response_model=LabOut)
+def update_individual_extensions(
+    lab_id: int,
+    extensions: Dict[str, str], # {"sv_username": "2026-05-30T23:59:59"}
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Cấu hình gia hạn riêng cho cá nhân sinh viên (Giảng viên/Admin)"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+        
+    if current_user.role == "lecturer":
+        class_exists = db.query(Class).filter(Class.id == lab.class_id).first()
+        if not class_exists or current_user not in class_exists.users:
+            raise HTTPException(status_code=403, detail="Bạn không quản lý lớp chứa bài lab này")
+            
+    # Cập nhật gia hạn cá nhân
+    current_extensions = dict(lab.individual_extensions or {})
+    for student_username, deadline_str in extensions.items():
+        # Kiểm tra sinh viên có tồn tại hay không
+        student = db.query(User).filter(User.username == student_username, User.role == "student").first()
+        if not student:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy sinh viên có tên đăng nhập '{student_username}'")
+            
+        current_extensions[student_username] = deadline_str
+        
+    lab.individual_extensions = current_extensions
+    db.commit()
+    db.refresh(lab)
+    
+    # Audit log
+    log = AuditLog(
+        user_id=current_user.id,
+        action="grant_extension",
+        target=f"Granted deadline extension on Lab ID {lab.id} to: {', '.join(extensions.keys())}",
+        ip_address=get_client_ip(request)
+    )
+    db.add(log)
+    db.commit()
+    
+    return lab
+
+# --- PROXMOX & GUACAMOLE VM ENDPOINTS ---
+
+@router.get("/templates/proxmox", response_model=List[Dict[str, Any]])
+def get_proxmox_templates(
+    current_user: User = Depends(require_lecturer)
+):
+    """API Lấy danh sách VM Templates từ Proxmox VE (Giảng viên/Admin)"""
+    from app.services.vm_service import get_available_templates
+    return get_available_templates()
+
+@router.post("/{lab_id}/vm-session")
+def get_or_create_vm_session(
+    lab_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_user)
+):
+    """API Sinh máy ảo cho sinh viên và trả về URL nhúng Apache Guacamole (HMAC)"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+        
+    if not lab.enable_vm:
+        raise HTTPException(status_code=400, detail="Bài lab này không yêu cầu máy ảo thực hành")
+    if lab.vm_protocol in {"rdp", "ssh"} and not lab.vm_username:
+        raise HTTPException(status_code=400, detail="Lab chưa cấu hình tên đăng nhập VM")
+    if not lab.vm_password:
+        raise HTTPException(status_code=400, detail="Lab chưa cấu hình mật khẩu VM")
+        
+    from app.services.vm_service import (
+        VMProvisionError,
+        provision_student_vm,
+        generate_guacamole_auth_json_url,
+    )
+
+    template_vmid = lab.template_vmid or settings.DEFAULT_TEMPLATE_VMID
+    is_linked = getattr(lab, 'is_linked_clone', True)
+    if is_linked is None:
+        is_linked = True
+    try:
+        ip_address, vmid = provision_student_vm(
+            student_username=current_user.username,
+            lab_id=lab.id,
+            template_vmid=template_vmid,
+            protocol=lab.vm_protocol,
+            port=lab.vm_port,
+            is_linked_clone=is_linked,
+        )
+    except VMProvisionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    print(f"[VM-SESSION] user={current_user.username} lab={lab_id} vmid={vmid} ip={ip_address}", flush=True)
+    
+
+    
+    guacamole_url = generate_guacamole_auth_json_url(
+        ip_address=ip_address,
+        student_username=current_user.username,
+        protocol=lab.vm_protocol,
+        port=lab.vm_port,
+        username=lab.vm_username,
+        password=lab.vm_password
+    )
+
+
+    
+    return {
+        "status": "ready",
+        "vmid": vmid,
+        "ip_address": ip_address,
+        "guacamole_url": guacamole_url,
+        "template_vmid": template_vmid,
+        "protocol": lab.vm_protocol,
+        "port": lab.vm_port
+    }
+
+@router.post("/{lab_id}/vm-rollback")
+def rollback_vm_session(
+    lab_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_user)
+):
+    """API Khôi phục máy ảo về trạng thái sạch ban đầu cho sinh viên"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+        
+    from app.services.vm_service import VMProvisionError, rollback_student_vm
+    try:
+        success = rollback_student_vm(
+            student_username=current_user.username,
+            lab_id=lab.id,
+        )
+    except VMProvisionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"message": "Đã gửi yêu cầu khôi phục máy ảo về bản sạch thành công", "success": success}
+
+@router.get("/{lab_id}/vms")
+def get_lab_student_vms(
+    lab_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Lấy danh sách máy ảo sinh viên thuộc bài lab (Giảng viên/Admin)"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+
+    if current_user.role == "lecturer" and current_user not in lab.class_.users:
+        raise HTTPException(status_code=403, detail="Bạn không quản lý bài lab này")
+
+    class_students = [u for u in lab.class_.users if u.role == "student"]
+    from app.services.vm_service import list_lab_vms
+    return list_lab_vms(lab_id, class_students)
+
+@router.post("/{lab_id}/vms/{vmid}/control")
+def control_lab_vm(
+    lab_id: int,
+    vmid: int,
+    payload: Dict[str, str], # {"action": "start"|"stop"|"purge"}
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Điều khiển / Bật / Tắt / Xóa sạch máy ảo sinh viên (Giảng viên/Admin)"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+
+    if current_user.role == "lecturer" and current_user not in lab.class_.users:
+        raise HTTPException(status_code=403, detail="Bạn không quản lý bài lab này")
+
+    action = payload.get("action")
+    if not action:
+        raise HTTPException(status_code=400, detail="Thiếu thuộc tính action")
+
+    if not (settings.STUDENT_VMID_MIN <= vmid <= settings.STUDENT_VMID_MAX):
+        raise HTTPException(
+            status_code=400, 
+            detail=(
+                f"BẢO VỆ AN TOÀN HỆ THỐNG: Hệ thống từ chối thao tác/xóa "
+                f"VMID {vmid} do nằm ngoài dải máy ảo sinh viên quy hoạch "
+                f"({settings.STUDENT_VMID_MIN} - {settings.STUDENT_VMID_MAX})!"
+            )
+        )
+
+    from app.services.vm_service import control_student_vm
+
+    result = control_student_vm(vmid, action)
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+
+    # Audit log
+    log = AuditLog(
+        user_id=current_user.id,
+        action=f"vm_{action}",
+        target=f"VM {action.upper()} executed on VMID {vmid} (Lab: {lab.title})",
+        ip_address=get_client_ip(request)
+    )
+    db.add(log)
+    db.commit()
+
+    return result
+
+@router.post("/{lab_id}/vms/batch-control")
+def batch_control_lab_vms(
+    lab_id: int,
+    payload: Dict[str, str], # {"action": "stop_all" | "purge_all"}
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """Batch VM management: stop all or purge all student VMs for a lab"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab not found")
+
+    if current_user.role == "lecturer" and current_user not in lab.class_.users:
+        raise HTTPException(status_code=403, detail="You do not manage this lab")
+
+    action = payload.get("action")
+    if action not in ["stop_all", "purge_all"]:
+        raise HTTPException(status_code=400, detail="Invalid batch action")
+
+    class_students = [u for u in lab.class_.users if u.role == "student"]
+    from app.services.vm_service import list_lab_vms, control_student_vm
+
+    vms = list_lab_vms(lab_id, class_students)
+    affected_count = 0
+
+    for vm in vms:
+        vmid = vm["vmid"]
+        status = vm["status"]
+        if action == "stop_all" and status == "running":
+            control_student_vm(vmid, "stop")
+            affected_count += 1
+        elif action == "purge_all" and status != "not_created":
+            control_student_vm(vmid, "purge")
+            affected_count += 1
+
+    action_text = "stop all" if action == "stop_all" else "purge all"
+    msg = f"Sent {action_text} command ({affected_count} VMs) for Lab {lab.title}"
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action=f"vm_batch_{action}",
+        target=msg,
+        ip_address=get_client_ip(request)
+    )
+    db.add(log)
+    db.commit()
+
+    return {"success": True, "message": msg, "affected_count": affected_count}
+
+
+
