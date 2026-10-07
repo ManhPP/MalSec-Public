@@ -24,6 +24,14 @@ for i in range(5):
         with engine.connect() as conn:
             from sqlalchemy import text
             conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS grade_tag VARCHAR;"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS attachment_files JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_drive_mode VARCHAR DEFAULT 'default';"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_drive_files JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS disable_vm_copy BOOLEAN DEFAULT FALSE;"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS disable_vm_paste BOOLEAN DEFAULT FALSE;"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS is_exam_mode BOOLEAN DEFAULT FALSE;"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS cpu_cores INTEGER;"))
+            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS ram_mb INTEGER;"))
             conn.execute(text("ALTER TABLE classes ADD COLUMN IF NOT EXISTS semester VARCHAR DEFAULT 'unknown';"))
             conn.execute(text("UPDATE classes SET semester = 'unknown' WHERE semester IS NULL;"))
             # Auto-seed semesters table from classes table if empty
@@ -52,9 +60,21 @@ for i in range(5):
                 if active_count == 0:
                     first_id = conn.execute(text("SELECT id FROM semesters ORDER BY id ASC LIMIT 1;")).scalar()
                     if first_id:
-                        conn.execute(text("UPDATE semesters SET is_active = TRUE WHERE id = :id;"), {"id": first_id})
-                    else:
                         conn.execute(text("INSERT INTO semesters (name, is_active, description, created_at) VALUES ('FA26', TRUE, 'Default Semester', CURRENT_TIMESTAMP);"))
+
+            # Create vm_tool_files table for file ownership tracking
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS vm_tool_files (
+                    id SERIAL PRIMARY KEY,
+                    filename VARCHAR NOT NULL,
+                    scope VARCHAR NOT NULL DEFAULT 'common',
+                    uploaded_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    size_bytes INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_vm_tool_files_scope ON vm_tool_files(scope);
+                CREATE INDEX IF NOT EXISTS idx_vm_tool_files_filename ON vm_tool_files(filename);
+            """))
             conn.commit()
         break
     except Exception as e:
@@ -135,6 +155,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    from fastapi.encoders import jsonable_encoder
     client_ip = get_client_ip(request)
     user_str = extract_user_from_request(request)
     errors = exc.errors()
@@ -144,7 +165,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
     return JSONResponse(
         status_code=422,
-        content={"detail": errors}
+        content={"detail": jsonable_encoder(errors)}
     )
 
 

@@ -1,9 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { 
   BookOpen, Terminal, Clock, FileCheck, CheckCircle, Award,
   Send, Save, Upload, ShieldAlert, Monitor, ChevronRight, Play, RotateCcw, AlertTriangle,
-  School, Layers, ChevronDown, Calendar
+  School, Layers, ChevronDown, Calendar, Trash2, Code, FileText, Lock,
+  Download, Eye, Paperclip, X, RefreshCw, ArrowLeft, ArrowRight, Camera,
+  Maximize2, Minimize2, Keyboard, ExternalLink
 } from 'lucide-react'
+import { renderAsync } from 'docx-preview'
 import { useAuth } from '../App.jsx'
 
 // --- CYBERPUNK MARKDOWN PARSER UTILITIES ---
@@ -266,6 +270,7 @@ export const formatLocalTime = (dateInput) => {
 };
 
 export default function StudentDashboard() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const { user } = useAuth()
   const [activeLabs, setActiveLabs] = useState([])
   const [gradedLabs, setGradedLabs] = useState([])
@@ -281,6 +286,12 @@ export default function StudentDashboard() {
   const [score, setScore] = useState(null)
   const [comment, setComment] = useState('')
   const [latePenalty, setLatePenalty] = useState(0.0)
+
+  // In-Browser Document Preview Modal State (DOCX, PDF, Code, Images)
+  const [previewDoc, setPreviewDoc] = useState(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
+  const docxContainerRef = useRef(null)
   
   // UI indicators
   const [loading, setLoading] = useState(false)
@@ -293,6 +304,9 @@ export default function StudentDashboard() {
 
   // Search & Filter state for Labs
   const [classes, setClasses] = useState([])
+  const [selectedClass, setSelectedClass] = useState(null)
+  const [activeClassTab, setActiveClassTab] = useState('labs') // 'labs' | 'scores'
+  const [classSearchQuery, setClassSearchQuery] = useState('')
   const [semestersList, setSemestersList] = useState([])
   const [labGroupByClass, setLabGroupByClass] = useState(true)
   const [collapsedClassGroups, setCollapsedClassGroups] = useState({})
@@ -313,7 +327,46 @@ export default function StudentDashboard() {
   const [vmLoading, setVmLoading] = useState(false)
   const [vmError, setVmError] = useState('')
   const [vmInfo, setVmInfo] = useState(null)
+  const [screenshotLoading, setScreenshotLoading] = useState(false)
+  const [screenshotNotice, setScreenshotNotice] = useState('')
+  const [examSubmitting, setExamSubmitting] = useState(false)
+  const [isVmFullscreen, setIsVmFullscreen] = useState(false)
   const guacamoleFrameRef = useRef(null)
+  const vmWrapperRef = useRef(null)
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsVmFullscreen(Boolean(document.fullscreenElement))
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  const toggleVmFullscreen = () => {
+    if (!vmWrapperRef.current) return
+    if (!document.fullscreenElement) {
+      vmWrapperRef.current.requestFullscreen().catch(err => {
+        console.error('Error attempting to enable fullscreen:', err)
+      })
+    } else {
+      document.exitFullscreen().catch(err => {
+        console.error('Error attempting to exit fullscreen:', err)
+      })
+    }
+  }
+
+  const focusIframe = () => {
+    try {
+      if (guacamoleFrameRef.current) {
+        guacamoleFrameRef.current.focus()
+        if (guacamoleFrameRef.current.contentWindow) {
+          guacamoleFrameRef.current.contentWindow.focus()
+        }
+      }
+    } catch (e) {
+      // ignore cross-origin focus errors if any
+    }
+  }
 
   const fetchVmSession = async (labId) => {
     setVmLoading(true)
@@ -380,6 +433,55 @@ export default function StudentDashboard() {
     } catch (err) {
       alert('VM rollback error: ' + err.message)
       setVmLoading(false)
+    }
+  }
+
+  const handleTakeScreenshot = async () => {
+    if (!selectedLab || !guacamoleUrl) return
+    setScreenshotLoading(true)
+    setScreenshotNotice('')
+    const token = localStorage.getItem('malsec_token')
+    try {
+      const res = await fetch(`/api/labs/${selectedLab.id}/vm-screenshot`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Could not capture VM screenshot')
+      setScreenshotNotice(`📸 ${data.message || 'Screenshot saved to Desktop inside your VM!'}`)
+      setTimeout(() => setScreenshotNotice(''), 6000)
+    } catch (err) {
+      alert('Screenshot error: ' + err.message)
+    } finally {
+      setScreenshotLoading(false)
+    }
+  }
+
+  const handleSubmitExamFromVm = async () => {
+    if (!selectedLab || !guacamoleUrl) return
+    const confirmSubmit = window.confirm(
+      'Are you sure you want to submit your exam report?\n\n' +
+      'The system will automatically scan and collect your Word report (.docx) and files from your Desktop\'s "Exam_Workspace" folder inside the VM and submit them to your instructor.'
+    )
+    if (!confirmSubmit) return
+
+    setExamSubmitting(true)
+    setScreenshotNotice('')
+    const token = localStorage.getItem('malsec_token')
+    try {
+      const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Could not submit exam from VM')
+
+      setScreenshotNotice(`🎓 Exam report submitted successfully! File: ${data.filename}`)
+      await fetchMySubmission(selectedLab.id)
+    } catch (err) {
+      alert('Exam Submission Error: ' + err.message)
+    } finally {
+      setExamSubmitting(false)
     }
   }
 
@@ -473,6 +575,56 @@ export default function StudentDashboard() {
   useEffect(() => {
     fetchStudentLabs()
     fetchRuntimeConfig()
+  }, [])
+
+  // Sync state FROM URL query params on mount & when searchParams / classes / activeLabs change
+  useEffect(() => {
+    const paramClassId = searchParams.get('classId')
+    const paramTab = searchParams.get('tab')
+    const paramLabId = searchParams.get('labId')
+
+    // 1. Doing lab view via URL: ?labId=123 (or ?classId=10&labId=123)
+    if (paramLabId) {
+      const allStudentLabs = [...activeLabs, ...gradedLabs]
+      if (allStudentLabs.length > 0) {
+        const foundLab = allStudentLabs.find(l => String(l.id) === String(paramLabId))
+        if (foundLab && (!selectedLab || String(selectedLab.id) !== String(paramLabId))) {
+          handleOpenLab(foundLab)
+        }
+      }
+      return
+    }
+
+    // 2. Class Hub view via URL: ?classId=10&tab=labs (or scores)
+    if (paramClassId) {
+      if (viewState !== 'dashboard') {
+        setViewState('dashboard')
+        setSelectedLab(null)
+      }
+      if (paramTab && ['labs', 'scores'].includes(paramTab)) {
+        if (activeClassTab !== paramTab) setActiveClassTab(paramTab)
+      }
+      if (classes.length > 0) {
+        const found = classes.find(c => String(c.id) === String(paramClassId))
+        if (found && (!selectedClass || String(selectedClass.id) !== String(paramClassId))) {
+          setSelectedClass(found)
+        }
+      }
+    } else {
+      // Home classes grid
+      if (viewState === 'dashboard' && selectedClass) {
+        setSelectedClass(null)
+      }
+    }
+  }, [classes, activeLabs, gradedLabs, searchParams])
+
+  // Listen to browser Back / Forward buttons
+  useEffect(() => {
+    const handlePopState = () => {
+      // URL searchParams change will trigger sync effect above
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
   // Helper tính hạn chót thực tế của sinh viên (kể cả gia hạn cá nhân)
@@ -580,6 +732,11 @@ export default function StudentDashboard() {
       }
       
       setViewState('doing_lab')
+      if (lab.class_id) {
+        setSearchParams({ classId: lab.class_id, labId: lab.id })
+      } else {
+        setSearchParams({ labId: lab.id })
+      }
       setLastSavedTime(new Date().toLocaleTimeString('en-US'))
 
       if (lab.enable_vm !== false) {
@@ -592,6 +749,85 @@ export default function StudentDashboard() {
     }
   }
 
+
+  // In-Browser Document Preview Handler (DOCX, PDF, Code, Images)
+  const handleOpenDocPreview = async (attachment) => {
+    if (!attachment || !attachment.filepath) return
+    const token = localStorage.getItem('malsec_token')
+    const fileUrl = `/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${token}`
+    const filename = attachment.original_filename || attachment.filename || 'document'
+    const ext = filename.split('.').pop().toLowerCase()
+
+    setPreviewError('')
+    const isCode = ['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log'].includes(ext)
+    setPreviewDoc({
+      filename,
+      filepath: attachment.filepath,
+      url: fileUrl,
+      type: ext === 'docx' ? 'docx' : ext === 'pdf' ? 'pdf' : ['png', 'jpg', 'jpeg'].includes(ext) ? 'image' : isCode ? 'code' : 'other',
+      content: ''
+    })
+
+    // If Code / Text, fetch text content directly
+    if (isCode) {
+      setPreviewLoading(true)
+      try {
+        const res = await fetch(fileUrl)
+        if (!res.ok) throw new Error('Unable to download source code file from server')
+        const textContent = await res.text()
+        setPreviewDoc(prev => prev ? { ...prev, content: textContent } : null)
+      } catch (err) {
+        console.error('Error loading code file:', err)
+        setPreviewError('Source code preview error: ' + err.message)
+      } finally {
+        setPreviewLoading(false)
+      }
+      return
+    }
+
+    // If DOCX, fetch arrayBuffer and render via docx-preview
+    if (ext === 'docx') {
+      setPreviewLoading(true)
+      try {
+        const res = await fetch(fileUrl)
+        if (!res.ok) throw new Error('Unable to download Word document from server')
+        const arrayBuffer = await res.arrayBuffer()
+        
+        setTimeout(async () => {
+          if (docxContainerRef.current) {
+            docxContainerRef.current.innerHTML = ''
+            await renderAsync(arrayBuffer, docxContainerRef.current, null, {
+              className: 'docx-preview-content',
+              inWrapper: false,
+              ignoreWidth: false,
+              ignoreHeight: false,
+              breakPages: true
+            })
+            const grayEls = docxContainerRef.current.querySelectorAll('*')
+            grayEls.forEach(el => {
+              if (el.style && (el.style.background === 'gray' || el.style.backgroundColor === 'gray')) {
+                el.style.background = '#ffffff'
+              }
+            })
+          }
+          setPreviewLoading(false)
+        }, 150)
+      } catch (err) {
+        console.error('Error rendering DOCX:', err)
+        setPreviewError('Error displaying DOCX document: ' + err.message)
+        setPreviewLoading(false)
+      }
+    }
+  }
+
+  const handleCloseDocPreview = () => {
+    setPreviewDoc(null)
+    setPreviewLoading(false)
+    setPreviewError('')
+    if (docxContainerRef.current) {
+      docxContainerRef.current.innerHTML = ''
+    }
+  }
 
   // Direct manual save draft
   const handleManualSaveDraft = async () => {
@@ -608,33 +844,37 @@ export default function StudentDashboard() {
     setAnswers(updated)
   }
 
-  // Secure File upload (with Airlock anti-virus/metadata sanitize checks)
+  // Secure File upload (with Airlock anti-virus/metadata sanitize checks - supports multiple files)
   const handleFileUpload = async (fieldId, e) => {
-    const file = e.target.files[0]
-    if (!file) return
+    const files = Array.from(e.target.files || [])
+    if (files.length === 0) return
 
     setUploadingField(fieldId)
     setError('')
     setSuccess('')
     const token = localStorage.getItem('malsec_token')
 
-    const formData = new FormData()
-    formData.append('file', file)
-
     try {
-      const res = await fetch(`/api/submissions/lab/${selectedLab.id}/upload/${fieldId}`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-        body: formData
-      })
+      let lastUploadedName = ''
+      for (const file of files) {
+        const formData = new FormData()
+        formData.append('file', file)
 
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Error uploading evidence file')
+        const res = await fetch(`/api/submissions/lab/${selectedLab.id}/upload/${fieldId}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData
+        })
 
-      setSuccess(data.message)
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || `Upload failed for file ${file.name}`)
+        lastUploadedName = data.filename
+      }
+
+      setSuccess(files.length > 1 ? `Successfully uploaded ${files.length} files!` : 'File uploaded successfully and verified!')
       setTimeout(() => setSuccess(''), 5000)
 
-      // Refresh attachment list
+      // Refresh submission detail & attachments
       const detailRes = await fetch(`/api/submissions/lab/${selectedLab.id}/my`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
@@ -642,21 +882,56 @@ export default function StudentDashboard() {
         const sub = await detailRes.json()
         if (sub) {
           setFileAttachments(sub.file_attachments || [])
-          setAnswers({ ...answers, [fieldId]: data.filename })
+          setAnswers(sub.answers || {})
         }
       }
-
     } catch (err) {
       setError(err.message)
     } finally {
       setUploadingField(null)
+      // Reset input element value so user can re-upload same file name if needed
+      e.target.value = ''
+    }
+  }
+
+  // Delete attachment handler
+  const handleDeleteAttachment = async (fieldId, filepath) => {
+    if (!window.confirm('Are you sure you want to remove this attachment?')) return
+    setError('')
+    setSuccess('')
+    const token = localStorage.getItem('malsec_token')
+
+    try {
+      const res = await fetch(`/api/submissions/lab/${selectedLab.id}/attachment/${fieldId}?filepath=${encodeURIComponent(filepath)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Error deleting attachment')
+
+      setSuccess('Attachment removed successfully!')
+      setTimeout(() => setSuccess(''), 3000)
+
+      // Refresh attachments list
+      const detailRes = await fetch(`/api/submissions/lab/${selectedLab.id}/my`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (detailRes.ok) {
+        const sub = await detailRes.json()
+        if (sub) {
+          setFileAttachments(sub.file_attachments || [])
+          setAnswers(sub.answers || {})
+        }
+      }
+    } catch (err) {
+      setError(err.message)
     }
   }
 
   // Final submission handler
   const handleSubmitSubmission = async () => {
     // Check required fields
-    const missingFields = selectedLab.form_fields.filter(
+    const missingFields = (selectedLab.form_fields || []).filter(
       f => f.required && !answers[f.id]
     )
 
@@ -692,22 +967,43 @@ export default function StudentDashboard() {
     const token = localStorage.getItem('malsec_token')
 
     try {
-      await triggerServerSideAutoSave(answers)
-      const res = await fetch(`/api/submissions/lab/${selectedLab.id}/submit`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ answers })
-      })
+      if (selectedLab?.is_exam_mode) {
+        // If Exam Mode is active, collect Word docx / workspace from VM Desktop
+        const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          }
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Error submitting exam from VM')
 
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Error submitting report')
+        setSuccess(data.message || 'Your exam report has been submitted successfully from VM!')
+        setSubmissionStatus(data.status || 'submitted')
+        if (data.file_attachments) {
+          setFileAttachments(data.file_attachments)
+        }
+        fetchStudentLabs()
+      } else {
+        // Regular Lab submission
+        await triggerServerSideAutoSave(answers)
+        const res = await fetch(`/api/submissions/lab/${selectedLab.id}/submit`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ answers })
+        })
 
-      setSuccess('Your lab report has been submitted successfully!')
-      setSubmissionStatus(data.status)
-      fetchStudentLabs()
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Error submitting report')
+
+        setSuccess('Your lab report has been submitted successfully!')
+        setSubmissionStatus(data.status)
+        fetchStudentLabs()
+      }
     } catch (err) {
       setError(err.message)
     } finally {
@@ -996,503 +1292,676 @@ export default function StudentDashboard() {
       {/* VIEW 1: STUDENT DASHBOARD GENERAL VIEW */}
       {viewState === 'dashboard' && (
         <div>
-          <div style={{ marginBottom: '24px' }}>
-            <h2 style={{ fontSize: '24px', color: 'var(--text-primary)' }}>Welcome, {user.full_name}!</h2>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Student ID: <b>{user.username}</b>{user.email && <> | Email: <b>{user.email}</b></>}. Complete your assigned malware analysis practical labs before deadlines.</p>
-          </div>
+          {!selectedClass ? (
+            /* ========================================================================= */
+            /* MODE A: GOOGLE CLASSROOM CARD GRID (ALL ENROLLED CLASSES)                 */
+            /* ========================================================================= */
+            <div>
+              <div style={{ marginBottom: '24px' }}>
+                <h2 style={{ fontSize: '24px', color: 'var(--text-primary)' }}>Welcome, {user.full_name}!</h2>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+                  Student ID: <b>{user.username}</b>{user.email && <> | Email: <b>{user.email}</b></>}. Select a class below to view assigned labs, launch VMs, and track your grades.
+                </p>
+              </div>
 
-          {/* Search and Filters Bar */}
-          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '24px', padding: '16px', background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', alignItems: 'center' }}>
-            <div style={{ flex: 1, minWidth: '240px', position: 'relative' }}>
-              <Terminal size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--neon-cyan)' }} />
-              <input 
-                type="text" 
-                className="form-input" 
-                style={{ paddingLeft: '36px', margin: 0 }}
-                placeholder="Search labs..."
-                value={studentLabSearch}
-                onChange={(e) => setStudentLabSearch(e.target.value)}
-              />
-            </div>
+              {/* Search and Filters Bar */}
+              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '24px', padding: '16px', background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', alignItems: 'center' }}>
+                <div style={{ flex: 1, minWidth: '240px', position: 'relative' }}>
+                  <Terminal size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--neon-cyan)' }} />
+                  <input 
+                    type="text" 
+                    className="form-input" 
+                    style={{ paddingLeft: '36px', margin: 0 }}
+                    placeholder="Search enrolled classes or subjects..."
+                    value={classSearchQuery}
+                    onChange={(e) => setClassSearchQuery(e.target.value)}
+                  />
+                </div>
 
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-              {/* Semester Filter */}
-              {studentAvailableSemesters.length > 0 && (
-                <select 
-                  className="form-select" 
-                  style={{ width: '150px', margin: 0 }}
-                  value={studentSemesterFilter}
-                  onChange={(e) => setStudentSemesterFilter(e.target.value)}
-                  title="Filter by academic semester"
-                >
-                  <option value="all">All Semesters</option>
-                  {studentAvailableSemesters.map(sem => (
-                    <option key={sem} value={sem}>{sem === 'unknown' ? 'Unknown Term' : `Semester ${sem}`}</option>
-                  ))}
-                </select>
-              )}
-
-              {/* Hide Past Semesters Toggle */}
-              {studentAvailableSemesters.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => setHidePastSemesters(!hidePastSemesters)}
-                  className={`btn ${hidePastSemesters ? 'btn-primary' : 'btn-secondary'}`}
-                  style={{ padding: '6px 10px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
-                  title="Hide labs from previous semesters"
-                >
-                  <Calendar size={13} />
-                  {hidePastSemesters ? 'Active Sem Only' : 'Show All Sems'}
-                </button>
-              )}
-
-              {/* Class Filter */}
-              {classes.length > 1 && (
-                <select 
-                  className="form-select" 
-                  style={{ width: '160px', margin: 0 }}
-                  value={studentLabClassFilter}
-                  onChange={(e) => setStudentLabClassFilter(e.target.value)}
-                >
-                  <option value="">All Classes</option>
-                  {classes
-                    .filter(c => !hidePastSemesters || (c.semester || 'unknown') === studentCurrentSemester || (c.semester || 'unknown') === 'unknown')
-                    .map(c => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} {c.semester && c.semester !== 'unknown' ? `(${c.semester})` : ''}
-                      </option>
-                    ))}
-                </select>
-              )}
-
-              {/* Filter Lab Status */}
-              <select 
-                className="form-select" 
-                style={{ width: '150px', margin: 0 }}
-                value={studentLabStatusFilter}
-                onChange={(e) => setStudentLabStatusFilter(e.target.value)}
-              >
-                <option value="all">All Statuses</option>
-                <option value="not_started">Not Started</option>
-                <option value="draft">Drafting</option>
-                <option value="resubmit">Resubmission Required</option>
-              </select>
-
-              {/* Sort */}
-              <select 
-                className="form-select" 
-                style={{ width: '170px', margin: 0 }}
-                value={studentLabSort}
-                onChange={(e) => setStudentLabSort(e.target.value)}
-              >
-                <option value="deadline_asc">Deadline (Earliest first)</option>
-                <option value="deadline_desc">Deadline (Latest first)</option>
-                <option value="title_asc">Lab Title (A-Z)</option>
-              </select>
-
-              {/* Group By Class Toggle */}
-              <button
-                type="button"
-                onClick={() => setLabGroupByClass(!labGroupByClass)}
-                className={`btn ${labGroupByClass ? 'btn-primary' : 'btn-secondary'}`}
-                style={{ padding: '6px 12px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}
-                title="Toggle hierarchical grouping by semester and class"
-              >
-                <Layers size={14} />
-                {labGroupByClass ? 'Hierarchical Grouping' : 'Flat List'}
-              </button>
-            </div>
-          </div>
-
-          {/* Active labs checklist */}
-          <div className="cyber-card" style={{ marginBottom: '24px' }}>
-            <h3 style={{ fontSize: '18px', marginBottom: '18px', borderBottom: '1px solid var(--border-color)', paddingBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <BookOpen size={20} className="brand-icon" /> Assigned Practical Labs
-            </h3>
-            
-            {labGroupByClass ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                {studentGroupedSemesters.map(semGroup => {
-                  const isSemCollapsed = !!collapsedSemesterGroups[semGroup.semester]
-                  return (
-                    <div 
-                      key={semGroup.semester}
-                      style={{ 
-                        border: '1px solid #cbd5e1', 
-                        borderRadius: '12px', 
-                        overflow: 'hidden', 
-                        background: '#ffffff',
-                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)'
-                      }}
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  {/* Semester Filter */}
+                  {studentAvailableSemesters.length > 0 && (
+                    <select 
+                      className="form-select" 
+                      style={{ width: '160px', margin: 0 }}
+                      value={studentSemesterFilter}
+                      onChange={(e) => setStudentSemesterFilter(e.target.value)}
+                      title="Filter classes by academic semester"
                     >
-                      {/* Tier 1: Semester Header */}
+                      <option value="all">All Semesters</option>
+                      {studentAvailableSemesters.map(sem => (
+                        <option key={sem} value={sem}>{sem === 'unknown' ? 'Unknown Term' : `Semester ${sem}`}</option>
+                      ))}
+                    </select>
+                  )}
+
+                  {/* Hide Past Semesters Toggle */}
+                  {studentAvailableSemesters.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setHidePastSemesters(!hidePastSemesters)}
+                      className={`btn ${hidePastSemesters ? 'btn-primary' : 'btn-secondary'}`}
+                      style={{ padding: '6px 12px', fontSize: '12.5px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                      title="Hide classes from previous semesters"
+                    >
+                      <Calendar size={14} />
+                      {hidePastSemesters ? 'Active Sem Only' : 'Show All Sems'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Semester-Grouped Classroom Cards Grid */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+                {(() => {
+                  const filteredClasses = classes.filter(cls => {
+                    const matchesSearch = cls.name.toLowerCase().includes(classSearchQuery.toLowerCase()) ||
+                                         (cls.description && cls.description.toLowerCase().includes(classSearchQuery.toLowerCase()))
+                    const matchesSemester = studentSemesterFilter === 'all' || (cls.semester || 'unknown') === studentSemesterFilter
+                    const matchesActiveSem = !hidePastSemesters || (cls.semester || 'unknown') === studentCurrentSemester || (cls.semester || 'unknown') === 'unknown'
+                    return matchesSearch && matchesSemester && matchesActiveSem
+                  })
+
+                  // Group by semester
+                  const groupedBySem = {}
+                  filteredClasses.forEach(c => {
+                    const sem = c.semester || 'unknown'
+                    if (!groupedBySem[sem]) groupedBySem[sem] = []
+                    groupedBySem[sem].push(c)
+                  })
+
+                  const sortedSemesters = Object.keys(groupedBySem).sort((a, b) => {
+                    if (a === studentCurrentSemester && b !== studentCurrentSemester) return -1
+                    if (b === studentCurrentSemester && a !== studentCurrentSemester) return 1
+                    if (a === 'unknown') return 1
+                    if (b === 'unknown') return -1
+                    return b.localeCompare(a)
+                  })
+
+                  if (sortedSemesters.length === 0) {
+                    return (
+                      <div className="cyber-card" style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)' }}>
+                        <School size={48} style={{ opacity: 0.3, marginBottom: '12px', color: 'var(--neon-cyan)' }} />
+                        <h3 style={{ fontSize: '18px', color: 'var(--text-primary)', marginBottom: '6px' }}>No Classes Found</h3>
+                        <p style={{ fontSize: '13.5px', color: 'var(--text-secondary)' }}>You are not enrolled in any classes matching the current filters.</p>
+                      </div>
+                    )
+                  }
+
+                  const bannerThemes = [
+                    { gradient: 'linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#3b82f6' },
+                    { gradient: 'linear-gradient(135deg, #065f46 0%, #10b981 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#10b981' },
+                    { gradient: 'linear-gradient(135deg, #581c87 0%, #8b5cf6 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#8b5cf6' },
+                    { gradient: 'linear-gradient(135deg, #9a3412 0%, #f97316 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#f97316' },
+                    { gradient: 'linear-gradient(135deg, #831843 0%, #ec4899 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#ec4899' },
+                    { gradient: 'linear-gradient(135deg, #134e4a 0%, #14b8a6 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#14b8a6' },
+                  ]
+
+                  return sortedSemesters.map(semester => {
+                    const semClasses = groupedBySem[semester]
+                    const isCollapsed = !!collapsedSemesterGroups[semester]
+
+                    return (
                       <div 
-                        onClick={() => toggleSemesterGroup(semGroup.semester)}
+                        key={semester} 
                         style={{ 
-                          display: 'flex', 
-                          justifyContent: 'space-between', 
-                          alignItems: 'center', 
-                          padding: '12px 18px', 
-                          background: 'linear-gradient(90deg, #f1f5f9 0%, #e2e8f0 100%)', 
-                          cursor: 'pointer',
-                          borderBottom: isSemCollapsed ? 'none' : '1px solid #cbd5e1',
-                          userSelect: 'none'
+                          border: '1px solid #cbd5e1', 
+                          borderRadius: '16px', 
+                          overflow: 'hidden', 
+                          background: '#ffffff',
+                          boxShadow: '0 4px 12px -2px rgba(0, 0, 0, 0.05)'
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          {isSemCollapsed ? <ChevronRight size={18} style={{ color: 'var(--neon-cyan)' }} /> : <ChevronDown size={18} style={{ color: 'var(--neon-cyan)' }} />}
-                          <Calendar size={18} style={{ color: 'var(--neon-cyan)' }} />
-                          <span style={{ fontSize: '16px', fontWeight: 'bold', color: 'var(--text-primary)', letterSpacing: '0.3px' }}>
-                            {semGroup.semester === 'unknown' ? 'Academic Term: Unknown' : `Academic Semester: ${semGroup.semester}`}
-                          </span>
-                          {semGroup.semester === studentCurrentSemester && (
-                            <span className="badge badge-submitted" style={{ fontSize: '10.5px', background: '#dcfce7', color: '#15803d', border: '1px solid #86efac' }}>
-                              Current Active Term
+                        {/* Semester Header */}
+                        <div 
+                          onClick={() => toggleSemesterGroup(semester)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '14px 20px',
+                            background: 'linear-gradient(90deg, #f8fafc 0%, #f1f5f9 100%)',
+                            cursor: 'pointer',
+                            userSelect: 'none',
+                            borderBottom: isCollapsed ? 'none' : '1px solid #e2e8f0'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            {isCollapsed ? <ChevronRight size={18} style={{ color: 'var(--neon-cyan)' }} /> : <ChevronDown size={18} style={{ color: 'var(--neon-cyan)' }} />}
+                            <Calendar size={18} style={{ color: 'var(--neon-cyan)' }} />
+                            <span style={{ fontSize: '17px', fontWeight: 'bold', color: 'var(--text-primary)', letterSpacing: '0.2px' }}>
+                              {semester === 'unknown' ? 'Unknown Academic Semester' : `Semester: ${semester}`}
                             </span>
-                          )}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span className="badge badge-draft" style={{ fontSize: '11.5px', fontWeight: '600' }}>
-                            {semGroup.classes.length} {semGroup.classes.length === 1 ? 'class' : 'classes'}
+                            {semester === studentCurrentSemester && (
+                              <span className="badge badge-submitted" style={{ fontSize: '10.5px', background: '#dcfce7', color: '#15803d', border: '1px solid #86efac', fontWeight: 'bold' }}>
+                                Current Active Term
+                              </span>
+                            )}
+                          </div>
+                          <span className="badge badge-draft" style={{ fontSize: '12px', fontWeight: '600' }}>
+                            {semClasses.length} {semClasses.length === 1 ? 'class' : 'classes'}
                           </span>
-                          <span className="badge badge-submitted" style={{ fontSize: '11.5px', fontWeight: '600' }}>
-                            {semGroup.totalLabs} {semGroup.totalLabs === 1 ? 'lab' : 'labs'}
-                          </span>
                         </div>
-                      </div>
 
-                      {/* Tier 2: Classes within Semester */}
-                      {!isSemCollapsed && (
-                        <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '16px', background: '#f8fafc' }}>
-                          {semGroup.classes.map(clsGroup => {
-                            const isClassCollapsed = !!collapsedClassGroups[clsGroup.classId]
-                            return (
-                              <div 
-                                key={clsGroup.classId}
-                                style={{ 
-                                  border: '1px solid var(--border-color)', 
-                                  borderRadius: '8px', 
-                                  overflow: 'hidden', 
-                                  background: '#ffffff',
-                                  boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
-                                }}
-                              >
-                                {/* Class Header */}
-                                <div 
-                                  onClick={() => toggleClassGroup(clsGroup.classId)}
-                                  style={{ 
-                                    display: 'flex', 
-                                    justifyContent: 'space-between', 
-                                    alignItems: 'center', 
-                                    padding: '12px 16px', 
-                                    background: '#ffffff', 
+                        {/* Grid of Class Cards */}
+                        {!isCollapsed && (
+                          <div style={{
+                            padding: '24px',
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fill, minmax(310px, 1fr))',
+                            gap: '24px',
+                            background: '#f8fafc'
+                          }}>
+                            {semClasses.map((cls, idx) => {
+                              const theme = bannerThemes[cls.id % bannerThemes.length]
+                              const classActiveLabs = activeLabs.filter(l => l.class_id === cls.id)
+                              const classGradedLabs = gradedLabs.filter(l => l.class_id === cls.id)
+                              const totalClassLabs = classActiveLabs.length + classGradedLabs.length
+                              
+                              // Calculate student's average score in this class if any graded
+                              let avgScore = null
+                              if (classGradedLabs.length > 0) {
+                                const validScores = classGradedLabs.map(l => l.submission?.score).filter(s => s !== null && s !== undefined)
+                                if (validScores.length > 0) {
+                                  avgScore = (validScores.reduce((a, b) => a + b, 0) / validScores.length).toFixed(1)
+                                }
+                              }
+
+                              return (
+                                <div
+                                  key={cls.id}
+                                  onClick={() => {
+                                    setSelectedClass(cls)
+                                    setActiveClassTab('labs')
+                                    setSearchParams({ classId: cls.id, tab: 'labs' })
+                                  }}
+                                  style={{
+                                    background: '#ffffff',
+                                    borderRadius: '12px',
+                                    border: '1px solid #e2e8f0',
+                                    boxShadow: '0 2px 6px -1px rgba(0, 0, 0, 0.06)',
+                                    overflow: 'hidden',
                                     cursor: 'pointer',
-                                    borderBottom: isClassCollapsed ? 'none' : '1px solid var(--border-color)',
-                                    userSelect: 'none'
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    transition: 'all 0.2s ease',
+                                    position: 'relative'
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    e.currentTarget.style.transform = 'translateY(-3px)'
+                                    e.currentTarget.style.boxShadow = '0 8px 16px -2px rgba(0, 0, 0, 0.1)'
+                                    e.currentTarget.style.borderColor = theme.accent
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    e.currentTarget.style.transform = 'translateY(0)'
+                                    e.currentTarget.style.boxShadow = '0 2px 6px -1px rgba(0, 0, 0, 0.06)'
+                                    e.currentTarget.style.borderColor = '#e2e8f0'
                                   }}
                                 >
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    {isClassCollapsed ? <ChevronRight size={16} style={{ color: 'var(--text-secondary)' }} /> : <ChevronDown size={16} style={{ color: 'var(--text-secondary)' }} />}
-                                    <School size={16} style={{ color: 'var(--neon-cyan)' }} />
-                                    <span style={{ fontSize: '14.5px', fontWeight: '700', color: 'var(--text-primary)' }}>
-                                      {clsGroup.className}
-                                    </span>
-                                    {clsGroup.classDesc && (
-                                      <span style={{ fontSize: '12.5px', color: 'var(--text-secondary)' }}>
-                                        — {clsGroup.classDesc}
+                                  {/* Google Classroom Banner */}
+                                  <div style={{
+                                    background: theme.gradient,
+                                    padding: '20px',
+                                    color: '#ffffff',
+                                    minHeight: '110px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    justifyContent: 'space-between'
+                                  }}>
+                                    <div>
+                                      <h3 style={{ 
+                                        fontSize: '18px', 
+                                        fontWeight: '700', 
+                                        color: '#ffffff', 
+                                        margin: 0,
+                                        lineHeight: '1.3'
+                                      }}>
+                                        {cls.name}
+                                      </h3>
+                                      <span style={{ 
+                                        fontSize: '12px', 
+                                        color: 'rgba(255,255,255,0.85)', 
+                                        marginTop: '4px', 
+                                        display: 'inline-block',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap',
+                                        maxWidth: '100%'
+                                      }}>
+                                        {cls.description || 'Cybersecurity Practice Lab'}
                                       </span>
-                                    )}
+                                    </div>
+
+                                    {/* Semester Badge inside banner */}
+                                    <div style={{ marginTop: '12px' }}>
+                                      <span style={{
+                                        background: theme.badgeBg,
+                                        backdropFilter: 'blur(4px)',
+                                        color: '#ffffff',
+                                        fontSize: '11px',
+                                        fontWeight: '600',
+                                        padding: '3px 8px',
+                                        borderRadius: '20px',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px'
+                                      }}>
+                                        📅 {cls.semester || 'unknown'}
+                                      </span>
+                                    </div>
                                   </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span className="badge badge-submitted" style={{ fontSize: '11px', fontWeight: '600' }}>
-                                      {clsGroup.labs.length} {clsGroup.labs.length === 1 ? 'lab' : 'labs'}
-                                    </span>
+
+                                  {/* Card Body: Key Student Metrics */}
+                                  <div style={{ padding: '16px 20px', flex: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                                      <div style={{ 
+                                        padding: '10px 12px', 
+                                        background: '#f8fafc', 
+                                        borderRadius: '8px', 
+                                        border: '1px solid #f1f5f9',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '10px'
+                                      }}>
+                                        <div style={{ color: theme.accent }}>
+                                          <BookOpen size={18} />
+                                        </div>
+                                        <div>
+                                          <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)' }}>
+                                            {classActiveLabs.length}
+                                          </div>
+                                          <div style={{ fontSize: '11.5px', color: 'var(--text-secondary)' }}>Active Labs</div>
+                                        </div>
+                                      </div>
+
+                                      <div style={{ 
+                                        padding: '10px 12px', 
+                                        background: '#f8fafc', 
+                                        borderRadius: '8px', 
+                                        border: '1px solid #f1f5f9',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '10px'
+                                      }}>
+                                        <div style={{ color: '#10b981' }}>
+                                          <FileCheck size={18} />
+                                        </div>
+                                        <div>
+                                          <div style={{ fontSize: '16px', fontWeight: '700', color: '#059669' }}>
+                                            {classGradedLabs.length}
+                                          </div>
+                                          <div style={{ fontSize: '11.5px', color: 'var(--text-secondary)' }}>Graded Labs</div>
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {/* Average Score / Status */}
+                                    <div style={{ 
+                                      fontSize: '12px', 
+                                      color: 'var(--text-secondary)', 
+                                      display: 'flex', 
+                                      alignItems: 'center', 
+                                      justifyContent: 'space-between',
+                                      marginTop: 'auto',
+                                      paddingTop: '6px'
+                                    }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        <Award size={14} style={{ color: avgScore ? '#059669' : 'var(--text-muted)' }} />
+                                        <span>Average Score:</span>
+                                      </div>
+                                      {avgScore !== null ? (
+                                        <span style={{ fontWeight: '700', color: avgScore >= 8 ? '#059669' : avgScore >= 5 ? '#d97706' : '#dc2626', fontSize: '13px' }}>
+                                          {avgScore} / 10
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: 'var(--text-muted)' }}>Not graded yet</span>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Card Footer: Quick Actions */}
+                                  <div style={{ 
+                                    padding: '10px 14px', 
+                                    background: '#ffffff', 
+                                    borderTop: '1px solid #f1f5f9',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: '6px'
+                                  }}>
+                                    <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', flex: 1 }}>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          setSelectedClass(cls)
+                                          setActiveClassTab('labs')
+                                          setSearchParams({ classId: cls.id, tab: 'labs' })
+                                        }}
+                                        className="btn btn-secondary"
+                                        style={{ padding: '4px 8px', fontSize: '11px', background: '#f8fafc', border: '1px solid #e2e8f0', color: '#475569', whiteSpace: 'nowrap' }}
+                                      >
+                                        <BookOpen size={12} style={{ marginRight: '3px' }} /> Labs ({totalClassLabs})
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          setSelectedClass(cls)
+                                          setActiveClassTab('scores')
+                                          setSearchParams({ classId: cls.id, tab: 'scores' })
+                                        }}
+                                        className="btn btn-secondary"
+                                        style={{ padding: '4px 8px', fontSize: '11px', background: '#f8fafc', border: '1px solid #e2e8f0', color: '#475569', whiteSpace: 'nowrap' }}
+                                      >
+                                        <Award size={12} style={{ marginRight: '3px' }} /> Scores ({classGradedLabs.length})
+                                      </button>
+                                    </div>
+
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '3px', color: theme.accent, fontWeight: '600', fontSize: '12px', flexShrink: 0 }}>
+                                      <ArrowRight size={14} />
+                                    </div>
                                   </div>
                                 </div>
-
-                                {/* Tier 3: Labs Table */}
-                                {!isClassCollapsed && (
-                                  <div className="table-container" style={{ margin: 0, border: 'none', borderRadius: 0 }}>
-                                    <table className="cyber-table">
-                                      <thead>
-                                        <tr>
-                                          <th>Lab Assignment</th>
-                                          <th>Deadline</th>
-                                          <th>Time Remaining</th>
-                                          <th>Status</th>
-                                          <th>Previous Feedback</th>
-                                          <th style={{ textAlign: 'right' }}>Action</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {clsGroup.labs.map(lab => {
-                                          const timer = getRemainingTime(lab)
-                                          const sub = lab.submission
-                                          const isExtension = (lab.individual_extensions || {})[user.username] !== undefined
-
-                                          return (
-                                            <tr key={lab.id}>
-                                              <td style={{ fontWeight: '600', color: 'var(--neon-cyan)', maxWidth: '320px' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
-                                                  <span style={{ fontSize: '15px', color: 'var(--neon-cyan)' }}>
-                                                    {lab.title}
-                                                  </span>
-                                                  <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '11px', fontWeight: '600', padding: '1px 6px' }}>
-                                                    🏷️ {lab.grade_tag || 'Default'}
-                                                  </span>
-                                                </div>
-                                                {lab.description && (
-                                                  <div style={{ 
-                                                    fontSize: '12.5px', 
-                                                    color: 'var(--text-secondary)', 
-                                                    fontWeight: 'normal',
-                                                    display: '-webkit-box',
-                                                    WebkitLineClamp: 2,
-                                                    WebkitBoxOrient: 'vertical',
-                                                    overflow: 'hidden',
-                                                    lineHeight: '1.45',
-                                                    marginTop: '2px'
-                                                  }}>
-                                                    {lab.description}
-                                                  </div>
-                                                )}
-                                                {isExtension && (
-                                                  <span className="badge badge-submitted" style={{ marginTop: '4px', display: 'inline-block', fontSize: '9.5px', padding: '2px 6px' }}>
-                                                    Individual Extension Granted
-                                                  </span>
-                                                )}
-                                              </td>
-
-                                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
-                                                {isExtension 
-                                                  ? formatLocalTime(lab.individual_extensions[user.username])
-                                                  : formatLocalTime(lab.deadline)}
-                                              </td>
-                                              <td style={{ 
-                                                color: timer.isExpired ? 'var(--neon-ruby)' : 'var(--neon-amber)',
-                                                fontWeight: '500'
-                                              }}>
-                                                {timer.text}
-                                              </td>
-                                              <td>
-                                                <span className={`badge ${
-                                                  !sub ? 'badge-draft' : 
-                                                  sub.status === 'draft' ? 'badge-draft' : 
-                                                  sub.status === 'submitted' ? 'badge-submitted' : 'badge-resubmit'
-                                                }`}>
-                                                  {!sub ? 'Not Started' : 
-                                                   sub.status === 'draft' ? 'Draft' : 
-                                                   sub.status === 'submitted' ? 'Submitted' : 'Resubmission Requested'}
-                                                </span>
-                                              </td>
-                                              <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                                                {sub?.comment ? sub.comment : '—'}
-                                              </td>
-                                              <td style={{ textAlign: 'right' }}>
-                                                <button onClick={() => handleOpenLab(lab)} className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '13px' }}>
-                                                  Start Lab &rarr;
-                                                </button>
-                                              </td>
-                                            </tr>
-                                          )
-                                        })}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-
-                {studentGroupedSemesters.length === 0 && (
-                  <div style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)' }}>
-                    No matching practical labs found.
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="table-container" style={{ margin: 0 }}>
-                <table className="cyber-table">
-                  <thead>
-                    <tr>
-                      <th>Lab Assignment</th>
-                      <th>Class</th>
-                      <th>Deadline</th>
-                      <th>Time Remaining</th>
-                      <th>Status</th>
-                      <th>Previous Feedback</th>
-                      <th style={{ textAlign: 'right' }}>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredActiveLabs.map(lab => {
-                      const timer = getRemainingTime(lab)
-                      const sub = lab.submission
-                      const isExtension = (lab.individual_extensions || {})[user.username] !== undefined
-                      const cls = classes.find(c => c.id === lab.class_id)
-
-                      return (
-                        <tr key={lab.id}>
-                          <td style={{ fontWeight: '600', color: 'var(--neon-cyan)', maxWidth: '320px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
-                              <span style={{ fontSize: '15px', color: 'var(--neon-cyan)' }}>
-                                {lab.title}
-                              </span>
-                              <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '11px', fontWeight: '600', padding: '1px 6px' }}>
-                                🏷️ {lab.grade_tag || 'Default'}
-                              </span>
-                            </div>
-                            {lab.description && (
-                              <div style={{ 
-                                fontSize: '12.5px', 
-                                color: 'var(--text-secondary)', 
-                                fontWeight: 'normal',
-                                display: '-webkit-box',
-                                WebkitLineClamp: 2,
-                                WebkitBoxOrient: 'vertical',
-                                overflow: 'hidden',
-                                lineHeight: '1.45',
-                                marginTop: '2px'
-                              }}>
-                                {lab.description}
-                              </div>
-                            )}
-                            {isExtension && (
-                              <span className="badge badge-submitted" style={{ marginTop: '4px', display: 'inline-block', fontSize: '9.5px', padding: '2px 6px' }}>
-                                Individual Extension Granted
-                              </span>
-                            )}
-                          </td>
-
-                          <td>
-                            <span className="badge badge-submitted" style={{ fontSize: '11px' }}>
-                              {cls ? cls.name : `Class #${lab.class_id}`}
-                            </span>
-                          </td>
-
-                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
-                            {isExtension 
-                              ? formatLocalTime(lab.individual_extensions[user.username])
-                              : formatLocalTime(lab.deadline)}
-                          </td>
-                          <td style={{ 
-                            color: timer.isExpired ? 'var(--neon-ruby)' : 'var(--neon-amber)',
-                            fontWeight: '500'
-                          }}>
-                            {timer.text}
-                          </td>
-                          <td>
-                            <span className={`badge ${
-                              !sub ? 'badge-draft' : 
-                              sub.status === 'draft' ? 'badge-draft' : 
-                              sub.status === 'submitted' ? 'badge-submitted' : 'badge-resubmit'
-                            }`}>
-                              {!sub ? 'Not Started' : 
-                               sub.status === 'draft' ? 'Draft' : 
-                               sub.status === 'submitted' ? 'Submitted' : 'Resubmission Requested'}
-                            </span>
-                          </td>
-                          <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                            {sub?.comment ? sub.comment : '—'}
-                          </td>
-                          <td style={{ textAlign: 'right' }}>
-                            <button onClick={() => handleOpenLab(lab)} className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '13px' }}>
-                              Start Lab &rarr;
-                            </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                    {filteredActiveLabs.length === 0 && (
-                      <tr>
-                        <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No matching practical labs found.</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-
-          {/* Graded labs / History */}
-          <div className="cyber-card">
-            <h3 style={{ fontSize: '18px', marginBottom: '18px', borderBottom: '1px solid var(--border-color)', paddingBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <FileCheck size={20} style={{ color: 'var(--neon-emerald)' }} /> Lab Grading History & Scores
-            </h3>
-            
-            <div className="table-container" style={{ margin: 0 }}>
-              <table className="cyber-table">
-                <thead>
-                  <tr>
-                    <th>Lab Assignment</th>
-                    <th>Class</th>
-                    <th>Submission Time</th>
-                    <th>Late Penalty</th>
-                    <th>Instructor Feedback</th>
-                    <th>Score</th>
-                    <th style={{ textAlign: 'right' }}>Review</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredGradedLabs.map(lab => {
-                    const sub = lab.submission
-                    const cls = classes.find(c => c.id === lab.class_id)
-                    return (
-                      <tr key={lab.id}>
-                        <td style={{ fontWeight: '500' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
-                            <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{lab.title}</span>
-                            <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '10.5px', fontWeight: '600', padding: '1px 6px' }}>
-                              🏷️ {lab.grade_tag || 'Default'}
-                            </span>
+                              )
+                            })}
                           </div>
-                        </td>
-                        <td>
-                          <div>
-                            <span className="badge badge-submitted" style={{ fontSize: '11px' }}>
-                              {cls ? cls.name : `Class #${lab.class_id}`}
-                            </span>
-                          </div>
-                          {cls?.semester && (
-                            <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '10px', marginTop: '3px', display: 'inline-block' }}>
-                              📅 {cls.semester}
-                            </span>
-                          )}
-                        </td>
-                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
-                          {formatLocalTime(sub.submitted_at)}
-                        </td>
-                        <td style={{ color: sub.late_penalty > 0 ? 'var(--neon-ruby)' : 'var(--text-secondary)' }}>
-                          {sub.late_penalty > 0 ? `Penalty: -${sub.late_penalty}%` : 'None'}
-                        </td>
-                        <td style={{ fontSize: '13px', color: 'var(--text-secondary)', maxWidth: '400px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {sub.comment || 'No comments provided'}
-                        </td>
-                        <td style={{ fontWeight: '700', color: 'var(--neon-emerald)', fontSize: '16px' }}>
-                          {sub.score} / 10
-                        </td>
-                        <td style={{ textAlign: 'right' }}>
-                          <button onClick={() => handleOpenLab(lab)} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '13px' }}>
-                            Review Submission
-                          </button>
-                        </td>
-                      </tr>
+                        )}
+                      </div>
                     )
-                  })}
-                  {filteredGradedLabs.length === 0 && (
-                    <tr>
-                      <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No graded submissions or matching labs found.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                  })
+                })()}
+              </div>
             </div>
-          </div>
+          ) : (
+            /* ========================================================================= */
+            /* MODE B: CLASS HUB FOR STUDENT (SELECTED CLASS)                            */
+            /* ========================================================================= */
+            <div>
+              {/* Back navigation & Class Header */}
+              <div className="cyber-card" style={{ padding: '20px 24px', marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedClass(null)
+                        setSearchParams({})
+                      }}
+                      className="btn btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: '12.5px', marginBottom: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px', background: '#f1f5f9', border: '1px solid #cbd5e1' }}
+                    >
+                      <ArrowLeft size={14} /> Back to All Classes
+                    </button>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                      <h2 style={{ fontSize: '24px', color: 'var(--text-primary)', margin: 0, fontWeight: '700' }}>
+                        {selectedClass.name}
+                      </h2>
+                      <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '12px', fontWeight: 'bold', padding: '4px 10px' }}>
+                        📅 Semester: {selectedClass.semester || 'unknown'}
+                      </span>
+                    </div>
+
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '13.5px', marginTop: '6px', marginBottom: 0 }}>
+                      {selectedClass.description || 'Cybersecurity Practice Lab'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Sub-tabs within this Class: Labs vs Scores */}
+                <div style={{ display: 'flex', gap: '8px', marginTop: '22px', borderTop: '1px solid var(--border-color)', paddingTop: '16px', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveClassTab('labs')
+                      setSearchParams({ classId: selectedClass.id, tab: 'labs' })
+                    }}
+                    className={`btn ${activeClassTab === 'labs' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '8px 16px', fontSize: '13px', fontWeight: activeClassTab === 'labs' ? '600' : '500' }}
+                  >
+                    <BookOpen size={15} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
+                    Assigned Labs ({activeLabs.filter(l => l.class_id === selectedClass.id).length})
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveClassTab('scores')
+                      setSearchParams({ classId: selectedClass.id, tab: 'scores' })
+                    }}
+                    className={`btn ${activeClassTab === 'scores' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '8px 16px', fontSize: '13px', fontWeight: activeClassTab === 'scores' ? '600' : '500' }}
+                  >
+                    <Award size={15} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
+                    Grading History & Scores ({gradedLabs.filter(l => l.class_id === selectedClass.id).length})
+                  </button>
+                </div>
+              </div>
+
+              {/* SUB-TAB 1: ASSIGNED LABS IN THIS CLASS */}
+              {activeClassTab === 'labs' && (
+                <div className="cyber-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
+                    <h3 style={{ fontSize: '18px', margin: 0, fontWeight: '600', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <BookOpen size={20} className="brand-icon" />
+                      Assigned Practical Labs in {selectedClass.name}
+                    </h3>
+
+                    {/* Filter by status / search inside class */}
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <select 
+                        className="form-select" 
+                        style={{ width: '150px', margin: 0, fontSize: '12.5px' }}
+                        value={studentLabStatusFilter}
+                        onChange={(e) => setStudentLabStatusFilter(e.target.value)}
+                      >
+                        <option value="all">All Statuses</option>
+                        <option value="not_started">Not Started</option>
+                        <option value="draft">Drafting</option>
+                        <option value="resubmit">Resubmission Required</option>
+                      </select>
+
+                      <select 
+                        className="form-select" 
+                        style={{ width: '170px', margin: 0, fontSize: '12.5px' }}
+                        value={studentLabSort}
+                        onChange={(e) => setStudentLabSort(e.target.value)}
+                      >
+                        <option value="deadline_asc">Deadline (Earliest first)</option>
+                        <option value="deadline_desc">Deadline (Latest first)</option>
+                        <option value="title_asc">Lab Title (A-Z)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const classActiveLabs = filteredActiveLabs.filter(l => l.class_id === selectedClass.id)
+
+                    if (classActiveLabs.length === 0) {
+                      return (
+                        <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+                          <BookOpen size={36} style={{ opacity: 0.3, marginBottom: '10px', color: 'var(--neon-cyan)' }} />
+                          <p style={{ margin: 0 }}>No active or pending practical labs in this class.</p>
+                        </div>
+                      )
+                    }
+
+                    return (
+                      <div className="table-container" style={{ margin: 0 }}>
+                        <table className="cyber-table">
+                          <thead>
+                            <tr>
+                              <th>Lab Assignment</th>
+                              <th>Deadline</th>
+                              <th>Time Remaining</th>
+                              <th>Status</th>
+                              <th>Instructor Feedback</th>
+                              <th style={{ textAlign: 'right' }}>Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {classActiveLabs.map(lab => {
+                              const timer = getRemainingTime(lab)
+                              const sub = lab.submission
+                              const isExtension = (lab.individual_extensions || {})[user.username] !== undefined
+
+                              return (
+                                <tr key={lab.id}>
+                                  <td style={{ fontWeight: '600', color: 'var(--neon-cyan)', maxWidth: '320px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
+                                      <span style={{ fontSize: '15px', color: 'var(--neon-cyan)' }}>
+                                        {lab.title}
+                                      </span>
+                                      <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '11px', fontWeight: '600', padding: '1px 6px' }}>
+                                        🏷️ {lab.grade_tag || 'Default'}
+                                      </span>
+                                      {lab.is_exam_mode && (
+                                        <span className="badge" style={{ background: '#fdf2f8', color: '#db2777', border: '1px solid #fbcfe8', fontSize: '10.5px', fontWeight: '700' }}>
+                                          🎓 Exam Mode
+                                        </span>
+                                      )}
+                                    </div>
+                                    {lab.description && (
+                                      <div style={{ 
+                                        fontSize: '12.5px', 
+                                        color: 'var(--text-secondary)', 
+                                        fontWeight: 'normal',
+                                        display: '-webkit-box',
+                                        WebkitLineClamp: 2,
+                                        WebkitBoxOrient: 'vertical',
+                                        overflow: 'hidden',
+                                        lineHeight: '1.45',
+                                        marginTop: '2px'
+                                      }}>
+                                        {lab.description}
+                                      </div>
+                                    )}
+                                    {isExtension && (
+                                      <span className="badge badge-submitted" style={{ marginTop: '4px', display: 'inline-block', fontSize: '9.5px', padding: '2px 6px' }}>
+                                        Individual Extension Granted
+                                      </span>
+                                    )}
+                                  </td>
+
+                                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+                                    {isExtension 
+                                      ? formatLocalTime(lab.individual_extensions[user.username])
+                                      : formatLocalTime(lab.deadline)}
+                                  </td>
+                                  <td style={{ 
+                                    color: timer.isExpired ? 'var(--neon-ruby)' : 'var(--neon-amber)',
+                                    fontWeight: '500'
+                                  }}>
+                                    {timer.text}
+                                  </td>
+                                  <td>
+                                    <span className={`badge ${
+                                      !sub ? 'badge-draft' : 
+                                      sub.status === 'draft' ? 'badge-draft' : 
+                                      sub.status === 'submitted' ? 'badge-submitted' : 'badge-resubmit'
+                                    }`}>
+                                      {!sub ? 'Not Started' : 
+                                       sub.status === 'draft' ? 'Draft' : 
+                                       sub.status === 'submitted' ? 'Submitted' : 'Resubmission Requested'}
+                                    </span>
+                                  </td>
+                                  <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                                    {sub?.comment ? sub.comment : '—'}
+                                  </td>
+                                  <td style={{ textAlign: 'right' }}>
+                                    <button onClick={() => handleOpenLab(lab)} className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '13px' }}>
+                                      Start Lab &rarr;
+                                    </button>
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )
+                  })()}
+                </div>
+              )}
+
+              {/* SUB-TAB 2: GRADING HISTORY & SCORES IN THIS CLASS */}
+              {activeClassTab === 'scores' && (
+                <div className="cyber-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
+                    <h3 style={{ fontSize: '18px', margin: 0, fontWeight: '600', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <FileCheck size={20} style={{ color: 'var(--neon-emerald)' }} />
+                      Lab Grading History & Scores in {selectedClass.name}
+                    </h3>
+                  </div>
+
+                  {(() => {
+                    const classGradedLabs = filteredGradedLabs.filter(l => l.class_id === selectedClass.id)
+
+                    if (classGradedLabs.length === 0) {
+                      return (
+                        <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+                          <Award size={36} style={{ opacity: 0.3, marginBottom: '10px', color: '#10b981' }} />
+                          <p style={{ margin: 0 }}>No graded submissions found for this class yet.</p>
+                        </div>
+                      )
+                    }
+
+                    return (
+                      <div className="table-container" style={{ margin: 0 }}>
+                        <table className="cyber-table">
+                          <thead>
+                            <tr>
+                              <th>Lab Assignment</th>
+                              <th>Submission Time</th>
+                              <th>Late Penalty</th>
+                              <th>Instructor Feedback</th>
+                              <th>Score</th>
+                              <th style={{ textAlign: 'right' }}>Review</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {classGradedLabs.map(lab => {
+                              const sub = lab.submission
+                              return (
+                                <tr key={lab.id}>
+                                  <td style={{ fontWeight: '500' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
+                                      <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{lab.title}</span>
+                                      <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '10.5px', fontWeight: '600', padding: '1px 6px' }}>
+                                        🏷️ {lab.grade_tag || 'Default'}
+                                      </span>
+                                    </div>
+                                  </td>
+                                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+                                    {formatLocalTime(sub.submitted_at)}
+                                  </td>
+                                  <td style={{ color: sub.late_penalty > 0 ? 'var(--neon-ruby)' : 'var(--text-secondary)' }}>
+                                    {sub.late_penalty > 0 ? `Penalty: -${sub.late_penalty}%` : 'None'}
+                                  </td>
+                                  <td style={{ fontSize: '13px', color: 'var(--text-secondary)', maxWidth: '400px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {sub.comment || 'No comments provided'}
+                                  </td>
+                                  <td style={{ fontWeight: '700', color: 'var(--neon-emerald)', fontSize: '16px' }}>
+                                    {sub.score} / 10
+                                  </td>
+                                  <td style={{ textAlign: 'right' }}>
+                                    <button onClick={() => handleOpenLab(lab)} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '13px' }}>
+                                      Review Submission
+                                    </button>
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )
+                  })()}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1501,7 +1970,20 @@ export default function StudentDashboard() {
         <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 80px)' }}>
           {/* Header navigation bar */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', paddingBottom: '12px', borderBottom: '1px solid var(--border-color)', marginBottom: '12px', flexShrink: 0 }}>
-            <button onClick={() => { setViewState('dashboard'); setSelectedLab(null); }} className="btn btn-secondary" style={{ padding: '6px 12px' }}>
+            <button 
+              onClick={() => { 
+                setViewState('dashboard'); 
+                const targetCId = selectedLab?.class_id || selectedClass?.id;
+                setSelectedLab(null); 
+                if (targetCId) {
+                  setSearchParams({ classId: targetCId, tab: activeClassTab || 'labs' })
+                } else {
+                  setSearchParams({})
+                }
+              }} 
+              className="btn btn-secondary" 
+              style={{ padding: '6px 12px' }}
+            >
               &larr; Back to Dashboard
             </button>
             <div>
@@ -1515,6 +1997,11 @@ export default function StudentDashboard() {
                 <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '11px', fontWeight: '600', padding: '1px 6px' }}>
                   🏷️ {selectedLab.grade_tag || 'Default'}
                 </span>
+                {selectedLab.is_exam_mode && (
+                  <span className="badge" style={{ background: '#fdf2f8', color: '#db2777', border: '1px solid #fbcfe8', fontSize: '11px', fontWeight: '700' }}>
+                    🎓 Exam Mode
+                  </span>
+                )}
                 <span className="badge" style={{ background: '#f1f5f9', color: '#475569', fontSize: '11px', fontWeight: '500', padding: '2px 8px', border: '1px solid #cbd5e1' }} title="Submission Deadline">
                   ⏰ Deadline: <b>{formatLocalTime(getEffectiveDeadline(selectedLab))}</b>
                 </span>
@@ -1567,70 +2054,120 @@ export default function StudentDashboard() {
             {/* Split Left (65%): Mind-blowing Apache Guacamole RDP connection simulator */}
             {selectedLab.enable_vm !== false && (
               <div className="split-left" style={{ height: '100%' }}>
-                <div className="vm-screen-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                <div 
+                  ref={vmWrapperRef} 
+                  className={`vm-screen-wrapper ${isVmFullscreen ? 'vm-fullscreen-mode' : ''}`} 
+                  style={{ 
+                    display: 'flex', 
+                    flexDirection: 'column', 
+                    height: '100%',
+                    background: '#090d16'
+                  }}
+                >
                   
                   {/* RDP Window Top bar */}
-                  <div className="vm-header-bar">
+                  <div className="vm-header-bar" style={isVmFullscreen ? { background: '#0f172a', borderBottom: '1px solid #334155' } : {}}>
                     <div className="vm-title">
                       <Monitor size={15} />
-                      <span>{vmOs}</span>
+                      <span>{vmOs} {isVmFullscreen && '(Full Screen)'}</span>
                     </div>
-                    <div className="vm-actions">
+                    <div className="vm-actions" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <button 
                         type="button" 
                         onClick={() => fetchVmSession(selectedLab.id)} 
-                        className="btn btn-secondary" 
+                        className="btn-icon" 
                         disabled={vmLoading}
-                        style={{ padding: '4px 8px', fontSize: '11px', background: '#374151', border: 'none', color: '#fff' }}
+                        style={{ width: '30px', height: '30px', background: '#334155', border: '1px solid #475569', color: '#f8fafc' }}
+                        title={vmLoading ? 'Initializing VM...' : 'Reload VM Session'}
                       >
-                        {vmLoading ? 'Initializing VM...' : 'Reload VM Session'}
+                        <RefreshCw size={14} className={vmLoading ? 'spin-animation' : ''} />
                       </button>
+
                       <button
                         type="button"
-                        onClick={() => guacamoleFrameRef.current?.focus()}
-                        className="btn btn-secondary"
-                        style={{ padding: '6px 12px', fontSize: '12px' }}
+                        onClick={focusIframe}
+                        className="btn-icon"
+                        style={{ width: '30px', height: '30px', background: '#3b82f6', border: '1px solid #60a5fa', color: '#ffffff' }}
                         disabled={!guacamoleUrl}
-                        title="Direct keyboard focus to virtual machine"
+                        title="Capture Keyboard (Focus typing into VM)"
                       >
-                        Capture Keyboard
+                        <Keyboard size={15} />
                       </button>
-                      {guacamoleUrl && (
+
+                      <button
+                        type="button"
+                        onClick={handleTakeScreenshot}
+                        className="btn-icon"
+                        style={{ width: '30px', height: '30px', background: '#0284c7', border: '1px solid #38bdf8', color: '#ffffff' }}
+                        disabled={!guacamoleUrl || screenshotLoading}
+                        title="Capture to VM Desktop (Save screenshot directly inside VM)"
+                      >
+                        <Camera size={15} className={screenshotLoading ? 'spin-animation' : ''} />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={toggleVmFullscreen}
+                        className="btn-icon"
+                        style={{ width: '30px', height: '30px', background: isVmFullscreen ? '#d97706' : '#059669', border: isVmFullscreen ? '1px solid #f59e0b' : '1px solid #10b981', color: '#ffffff' }}
+                        disabled={!guacamoleUrl}
+                        title={isVmFullscreen ? 'Exit Full Screen (ESC)' : 'Full Screen Mode (Keeping Toolbar)'}
+                      >
+                        {isVmFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                      </button>
+
+                      {guacamoleUrl && !isVmFullscreen && (
                         <a 
                           href={guacamoleUrl} 
                           target="_blank" 
                           rel="noreferrer"
-                          className="btn btn-secondary" 
-                          style={{ padding: '4px 8px', fontSize: '11px', background: 'var(--neon-cyan)', border: 'none', color: '#000', fontWeight: 'bold', textDecoration: 'none' }}
+                          className="btn-icon" 
+                          style={{ width: '30px', height: '30px', background: '#f59e0b', border: '1px solid #fbbf24', color: '#000' }}
+                          title="Open VM in New Window / Tab"
                         >
-                          New Window ↗
+                          <ExternalLink size={14} />
                         </a>
                       )}
+
                       <button 
                         type="button" 
                         onClick={handleRollbackVm} 
-                        className="btn btn-danger" 
+                        className="btn-icon" 
                         disabled={vmLoading}
-                        style={{ padding: '4px 8px', fontSize: '11px', border: 'none' }}
-                        title="Revert VM to initial clean state on Proxmox"
+                        style={{ width: '30px', height: '30px', background: '#dc2626', border: '1px solid #ef4444', color: '#ffffff' }}
+                        title="Rollback Clean VM (Revert to initial state on Proxmox while preserving Exam_Workspace)"
                       >
-                        <RotateCcw size={11} /> Rollback Clean VM (Proxmox)
+                        <RotateCcw size={14} />
                       </button>
                     </div>
                   </div>
 
+                  {screenshotNotice && (
+                    <div style={{ background: '#064e3b', color: '#6ee7b7', padding: '6px 14px', fontSize: '12px', fontWeight: '500', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #059669' }}>
+                      <span>{screenshotNotice}</span>
+                      <button type="button" onClick={() => setScreenshotNotice('')} style={{ background: 'transparent', border: 'none', color: '#6ee7b7', cursor: 'pointer', fontSize: '14px' }}>✕</button>
+                    </div>
+                  )}
+
                   {/* Real Guacamole RDP / Proxmox VM Display */}
-                  <div style={{ 
-                    flex: 1, 
-                    background: '#090d16', 
-                    display: 'flex', 
-                    flexDirection: 'column', 
-                    justifyContent: 'center', 
-                    alignItems: 'center',
-                    position: 'relative',
-                    border: '1px solid #1f2937',
-                    overflow: 'hidden'
-                  }}>
+                  <div 
+                    onClick={focusIframe}
+                    onMouseDown={focusIframe}
+                    style={{ 
+                      flex: 1, 
+                      background: '#090d16', 
+                      display: 'flex', 
+                      flexDirection: 'column', 
+                      justifyContent: 'center', 
+                      alignItems: 'center',
+                      position: 'relative',
+                      border: '1px solid #1f2937',
+                      overflow: 'hidden',
+                      cursor: guacamoleUrl ? 'crosshair' : 'default'
+                    }}
+                  >
+
+
                     {vmLoading ? (
                       <div style={{ textAlign: 'center', color: 'var(--neon-cyan)', padding: '24px' }}>
                         <div style={{ fontSize: '16px', fontWeight: 'bold', marginBottom: '8px' }}>⚡ Initializing Proxmox VM & Authorizing Guacamole...</div>
@@ -1650,8 +2187,9 @@ export default function StudentDashboard() {
                         src={guacamoleUrl} 
                         title="Apache Guacamole Proxmox VDI Desktop"
                         tabIndex="0"
-                        onLoad={() => guacamoleFrameRef.current?.focus()}
-                        onMouseEnter={() => guacamoleFrameRef.current?.focus()}
+                        onLoad={focusIframe}
+                        onMouseEnter={focusIframe}
+                        onClick={focusIframe}
                         style={{ width: '100%', height: '100%', border: 'none', outline: 'none' }}
                         allow="clipboard-read; clipboard-write; fullscreen; keyboard-map"
                       />
@@ -1711,9 +2249,180 @@ export default function StudentDashboard() {
                 </div>
               )}
 
+              {/* Lab Materials / Instructor Attachments (Tài liệu học liệu đính kèm do Giảng viên cung cấp) */}
+              {/* Lab Materials / Instructor Attachments */}
+              {selectedLab.attachment_files && selectedLab.attachment_files.length > 0 && (
+                <div className="cyber-card" style={{
+                  marginBottom: '20px',
+                  padding: '16px',
+                  background: 'rgba(242, 112, 36, 0.04)',
+                  border: '1px solid rgba(242, 112, 36, 0.3)',
+                  borderRadius: '8px'
+                }}>
+                  <h4 style={{
+                    fontSize: '14.5px',
+                    color: 'var(--neon-cyan)',
+                    fontWeight: '600',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    marginBottom: '10px',
+                    borderBottom: '1px dashed rgba(242, 112, 36, 0.2)',
+                    paddingBottom: '8px'
+                  }}>
+                    <Paperclip size={16} /> Lab Reference Materials & Attachments
+                  </h4>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '12px', margin: '0 0 10px 0' }}>
+                    Reference documents, malware samples, or practice files provided by the instructor for this lab:
+                  </p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {selectedLab.attachment_files.map((item, idx) => {
+                      const fname = item.original_filename || item.filename || 'Document'
+                      const ext = (fname || '').split('.').pop().toLowerCase()
+                      const isCode = ['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log'].includes(ext)
+                      const isPdf = ext === 'pdf'
+                      const isDocx = ext === 'docx'
+                      const isImg = ['png', 'jpg', 'jpeg'].includes(ext)
+                      const canPreview = isPdf || isDocx || isCode || isImg
+                      const fileUrl = `/api/submissions/file?path=${encodeURIComponent(item.filepath)}&token=${localStorage.getItem('malsec_token')}`
+
+                      return (
+                        <div
+                          key={idx}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '10px 14px',
+                            background: '#ffffff',
+                            borderRadius: '6px',
+                            border: '1px solid var(--border-color)',
+                            fontSize: '13px'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
+                            {isCode ? (
+                              <Code size={16} style={{ color: 'var(--neon-amber)', flexShrink: 0 }} />
+                            ) : isImg ? (
+                              <CheckCircle size={16} style={{ color: 'var(--neon-emerald)', flexShrink: 0 }} />
+                            ) : (
+                              <FileText size={16} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
+                            )}
+                            <span style={{ fontWeight: '500', color: 'var(--text-primary)', wordBreak: 'break-all' }}>
+                              {fname}
+                            </span>
+                            {item.size_bytes && (
+                              <span style={{ fontSize: '11px', color: 'var(--text-muted)', flexShrink: 0 }}>
+                                ({(item.size_bytes / 1024).toFixed(1)} KB)
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0, marginLeft: '10px' }}>
+                            {canPreview && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenDocPreview({ filepath: item.filepath, original_filename: fname })}
+                                className="btn btn-secondary"
+                                style={{ padding: '4px 8px', fontSize: '11.5px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                                title="Preview directly in browser"
+                              >
+                                <Eye size={13} /> View
+                              </button>
+                            )}
+                            <a
+                              href={`${fileUrl}&download=true`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="btn btn-primary"
+                              style={{ padding: '4px 10px', fontSize: '11.5px', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
+                              title="Download to computer"
+                            >
+                              <Download size={13} /> Download
+                            </a>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Exam Mode Instruction Banner & Submitted Files (Right Panel) */}
+              {selectedLab.is_exam_mode && (
+                <div className="cyber-card" style={{ 
+                  background: 'rgba(236, 72, 153, 0.05)', 
+                  border: '1.5px solid #ec4899', 
+                  padding: '18px', 
+                  borderRadius: '10px', 
+                  marginBottom: '20px' 
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '18px' }}>🎓</span>
+                    <h4 style={{ fontSize: '15px', color: '#be185d', fontWeight: '700', margin: 0 }}>
+                      Exam / Test Mode Active
+                    </h4>
+                  </div>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.55', margin: '0 0 12px 0' }}>
+                    Write your report in Microsoft Word (<b>.docx</b>) and save it inside the <b>Exam_Workspace</b> folder on your VM Desktop. Click <b>"Submit Final Report"</b> on the top bar to finish. Clean VM rollbacks safely preserve your work.
+                  </p>
+
+                  {/* If student has already submitted, show current attached files */}
+                  {fileAttachments && fileAttachments.length > 0 && (
+                    <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px dashed #fbcfe8' }}>
+                      <div style={{ fontSize: '12px', fontWeight: '600', color: '#be185d', marginBottom: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span>📎 Submitted Documents ({fileAttachments.length}):</span>
+                        <span className="badge" style={{ background: '#059669', color: '#fff', fontSize: '10.5px' }}>Submitted</span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {fileAttachments.map((att, aIdx) => {
+                          const fname = att.original_filename || 'Attachment'
+                          const ext = (fname || '').split('.').pop().toLowerCase()
+                          const isDocx = ext === 'docx'
+                          const isZip = ext === 'zip'
+                          return (
+                            <div key={aIdx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#ffffff', borderRadius: '6px', border: '1px solid #fbcfe8', fontSize: '12.5px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, overflow: 'hidden' }}>
+                                <FileText size={16} style={{ color: isDocx ? '#2563eb' : isZip ? '#d97706' : '#64748b', flexShrink: 0 }} />
+                                <span style={{ fontWeight: '500', color: 'var(--text-primary)', wordBreak: 'break-all' }}>{fname}</span>
+                                {isDocx && <span className="badge" style={{ background: '#2563eb', color: '#fff', fontSize: '9.5px', padding: '1px 5px' }}>WORD</span>}
+                              </div>
+                              <div style={{ display: 'flex', gap: '6px', flexShrink: 0, marginLeft: '8px' }}>
+                                {['pdf', 'docx', 'png', 'jpg'].includes(ext) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDocPreview(att)}
+                                    className="btn btn-secondary"
+                                    style={{ padding: '3px 8px', fontSize: '11px' }}
+                                  >
+                                    <Eye size={12} /> View
+                                  </button>
+                                )}
+                                <a
+                                  href={`/api/submissions/file?path=${encodeURIComponent(att.filepath)}&download=true&token=${localStorage.getItem('malsec_token')}`}
+                                  className="btn btn-secondary"
+                                  style={{ padding: '3px 8px', fontSize: '11px' }}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  <Download size={12} />
+                                </a>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div style={{ marginBottom: '20px' }}>
-                <h3 style={{ fontSize: '18px', color: 'var(--text-primary)', marginBottom: '4px' }}>Lab Report Submission</h3>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '12.5px' }}>Answer questions and attach evidence files below.</p>
+                <h3 style={{ fontSize: '18px', color: 'var(--text-primary)', marginBottom: '4px' }}>
+                  {selectedLab.is_exam_mode ? 'Exam Report Submission' : 'Lab Report Submission'}
+                </h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '12.5px' }}>
+                  {selectedLab.is_exam_mode ? 'Author your report in Microsoft Word inside the VM Desktop.' : 'Answer questions and attach evidence files below.'}
+                </p>
               </div>
 
 
@@ -1772,11 +2481,25 @@ export default function StudentDashboard() {
                 </div>
               )}
 
+
+
               {/* Render dynamic Form fields based on selectedLab layout */}
-              {selectedLab.form_fields.map((field) => {
+              {!selectedLab.is_exam_mode && (!selectedLab.form_fields || selectedLab.form_fields.length === 0) && (
+                <div className="cyber-card" style={{ background: '#f8fafc', border: '1px dashed var(--border-color)', padding: '24px', textAlign: 'center', marginBottom: '20px' }}>
+                  <FileText size={32} style={{ color: 'var(--text-muted)', marginBottom: '8px' }} />
+                  <h4 style={{ fontSize: '14.5px', color: 'var(--text-primary)', fontWeight: '600', marginBottom: '4px' }}>
+                    No Additional Form Questions
+                  </h4>
+                  <p style={{ fontSize: '12.5px', color: 'var(--text-secondary)', margin: 0 }}>
+                    This lab does not have custom form fields.
+                  </p>
+                </div>
+              )}
+
+              {(selectedLab.form_fields || []).map((field) => {
                 const isReadOnly = !canEditSubmission()
                 const ans = answers[field.id] || ''
-                const attachment = fileAttachments.find(a => a.field_id === field.id)
+                const fieldAttachments = (fileAttachments || []).filter(a => a.field_id === field.id)
 
                 return (
                   <div key={field.id} className="form-group" style={{ marginBottom: '24px' }}>
@@ -1861,39 +2584,81 @@ export default function StudentDashboard() {
                       />
                     )}
 
-                    {/* FIELD TYPE: FILE UPLOAD (Screenshots, PCAPs) */}
+                    {/* FIELD TYPE: FILE UPLOAD (Screenshots, PCAPs, Code, Word/PDF) */}
                     {field.type === 'file' && (
-                      <div>
-                        {attachment ? (
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid var(--border-color)', fontSize: '13px' }}>
-                            <span style={{ color: 'var(--neon-cyan)', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <CheckCircle size={15} />
-                              <a 
-                                href={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${localStorage.getItem('malsec_token')}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                style={{ color: 'var(--neon-cyan)', textDecoration: 'underline' }}
-                              >
-                                {attachment.original_filename}
-                              </a>
-                            </span>
-                            {!isReadOnly && (
-                              <label style={{ color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '12px' }}>
-                                Upload different file...
-                                <input 
-                                  type="file" 
-                                  style={{ display: 'none' }}
-                                  onChange={(e) => handleFileUpload(field.id, e)}
-                                />
-                              </label>
-                            )}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {/* List of currently attached files for this field */}
+                        {fieldAttachments.length > 0 && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            {fieldAttachments.map((att, attIdx) => {
+                              const ext = (att.original_filename || '').split('.').pop().toLowerCase();
+                              const isCode = ['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go'].includes(ext);
+                              return (
+                                <div 
+                                  key={attIdx} 
+                                  style={{ 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    justifyContent: 'space-between', 
+                                    padding: '10px 14px', 
+                                    background: 'rgba(0,0,0,0.25)', 
+                                    borderRadius: '6px', 
+                                    border: '1px solid var(--border-color)', 
+                                    fontSize: '13px' 
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
+                                    {isCode ? (
+                                      <Code size={16} style={{ color: 'var(--neon-amber)', flexShrink: 0 }} />
+                                    ) : ['png', 'jpg', 'jpeg'].includes(ext) ? (
+                                      <CheckCircle size={16} style={{ color: 'var(--neon-emerald)', flexShrink: 0 }} />
+                                    ) : (
+                                      <FileText size={16} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
+                                    )}
+                                    <a 
+                                      href={`/api/submissions/file?path=${encodeURIComponent(att.filepath)}&token=${localStorage.getItem('malsec_token')}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      style={{ color: 'var(--neon-cyan)', textDecoration: 'underline', fontWeight: '500', wordBreak: 'break-all' }}
+                                    >
+                                      {att.original_filename}
+                                    </a>
+                                    {isCode && (
+                                      <span className="badge badge-submitted" style={{ fontSize: '10px', padding: '1px 5px' }}>CODE</span>
+                                    )}
+                                  </div>
+
+                                  {!isReadOnly && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteAttachment(field.id, att.filepath)}
+                                      style={{
+                                        background: 'transparent',
+                                        border: 'none',
+                                        color: 'var(--neon-ruby)',
+                                        cursor: 'pointer',
+                                        padding: '4px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        marginLeft: '10px'
+                                      }}
+                                      title="Delete this file"
+                                    >
+                                      <Trash2 size={16} />
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
-                        ) : isReadOnly ? (
-                          <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>(Empty)</span>
-                        ) : (
-                          <div className="upload-zone" style={{ padding: '16px 24px' }}>
+                        )}
+
+                        {/* Upload Zone (Multiple Files Supported) */}
+                        {!isReadOnly ? (
+                          <div className="upload-zone" style={{ padding: '16px 24px', marginTop: fieldAttachments.length > 0 ? '6px' : '0' }}>
                             <input 
                               type="file" 
+                              multiple
                               style={{ display: 'none' }} 
                               id={`fileInput-${field.id}`}
                               onChange={(e) => handleFileUpload(field.id, e)}
@@ -1902,17 +2667,23 @@ export default function StudentDashboard() {
                             <label htmlFor={`fileInput-${field.id}`} style={{ cursor: 'pointer', display: 'block' }}>
                               <Upload size={20} className="upload-icon" style={{ margin: '0 auto 6px' }} />
                               <p style={{ fontSize: '13px', fontWeight: '500' }}>
-                                {uploadingField === field.id ? 'SCANNING SECURITY & UPLOADING...' : 'Choose document (PDF, DOCX), image or ZIP file'}
+                                {uploadingField === field.id 
+                                  ? 'SECURITY SCANNING & UPLOADING...' 
+                                  : fieldAttachments.length > 0 
+                                    ? '+ Attach another file (supports multiple files, code files, images, docx, pdf, zip)...'
+                                    : 'Select attachment files (supports multiple files, code files, images, docx, pdf, zip)'}
                               </p>
                               {runtimeConfig?.uploads && (
                                 <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                                   Allowed formats: {runtimeConfig.uploads.allowed_extensions.join(', ')}.
-                                  {runtimeConfig.uploads.zip_password ? ` ZIP password: '${runtimeConfig.uploads.zip_password}'.` : ''}
+                                  {runtimeConfig.uploads.zip_password ? ` ZIP password if compressing samples: '${runtimeConfig.uploads.zip_password}'.` : ''}
                                 </p>
                               )}
                             </label>
                           </div>
-                        )}
+                        ) : fieldAttachments.length === 0 ? (
+                          <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>(Empty)</span>
+                        ) : null}
                       </div>
                     )}
                   </div>
@@ -1920,6 +2691,162 @@ export default function StudentDashboard() {
               })}
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* DOCUMENT PREVIEW MODAL (PDF / DOCX / CODE / IMAGE) */}
+      {previewDoc && (
+        <div className="modal-overlay" style={{ zIndex: 9999, background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(4px)' }}>
+          <div 
+            className="modal-content" 
+            style={{ 
+              maxWidth: '1100px', 
+              width: '95vw', 
+              height: '92vh', 
+              display: 'flex', 
+              flexDirection: 'column',
+              background: '#ffffff',
+              borderRadius: '12px',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+              overflow: 'hidden'
+            }}
+          >
+            {/* Header */}
+            <div className="modal-header" style={{ padding: '14px 20px', background: '#f8fafc', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span className="badge" style={{ background: previewDoc.type === 'pdf' ? '#ef4444' : previewDoc.type === 'docx' ? '#2563eb' : '#059669', color: '#fff', fontSize: '11px', fontWeight: 'bold' }}>
+                  {previewDoc.type.toUpperCase()}
+                </span>
+                <h3 style={{ fontSize: '15px', color: 'var(--text-primary)', margin: 0, fontWeight: '600', maxWidth: '600px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={previewDoc.filename}>
+                  {previewDoc.filename}
+                </h3>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <a 
+                  href={`${previewDoc.url}&download=true`} 
+                  className="btn btn-secondary" 
+                  style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                  target="_blank" 
+                  rel="noreferrer"
+                >
+                  <Download size={13} /> Download Original
+                </a>
+                <button 
+                  type="button" 
+                  onClick={handleCloseDocPreview} 
+                  className="btn btn-secondary" 
+                  style={{ padding: '6px 10px', fontSize: '13px', display: 'flex', alignItems: 'center' }}
+                  title="Close document preview"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+
+            {/* Content Body */}
+            <div style={{ flex: 1, position: 'relative', overflowY: 'auto', background: previewDoc.type === 'pdf' ? '#525659' : '#ffffff', display: 'flex', flexDirection: 'column' }}>
+              {previewLoading && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: '12px', padding: '40px', color: 'var(--text-primary)' }}>
+                  <RefreshCw size={28} className="spin-slow" style={{ color: 'var(--neon-cyan)' }} />
+                  <p style={{ fontSize: '14px', margin: 0 }}>Loading document preview...</p>
+                </div>
+              )}
+
+              {previewError && (
+                <div style={{ margin: '24px auto', maxWidth: '600px', padding: '20px', background: '#fee2e2', border: '1px solid #f87171', borderRadius: '8px', color: '#991b1b', textAlign: 'center' }}>
+                  <p style={{ fontWeight: 'bold', marginBottom: '8px' }}>Unable to display document directly</p>
+                  <p style={{ fontSize: '13px', marginBottom: '16px' }}>{previewError}</p>
+                  <a 
+                    href={`${previewDoc.url}&download=true`} 
+                    className="btn btn-primary"
+                    style={{ padding: '8px 16px', fontSize: '13px' }}
+                    target="_blank" 
+                    rel="noreferrer"
+                  >
+                    <Download size={14} style={{ marginRight: '6px' }} /> Download to view
+                  </a>
+                </div>
+              )}
+
+              {/* PDF Preview: Native Browser Viewer via iframe */}
+              {previewDoc.type === 'pdf' && !previewError && (
+                <iframe
+                  src={previewDoc.url}
+                  title={previewDoc.filename}
+                  style={{ width: '100%', height: '100%', border: 'none', flex: 1 }}
+                />
+              )}
+
+              {/* DOCX Preview: Rendered HTML Container via docx-preview */}
+              {previewDoc.type === 'docx' && (
+                <div 
+                  ref={docxContainerRef} 
+                  style={{ 
+                    display: previewLoading ? 'none' : 'block',
+                    padding: '24px', 
+                    margin: '0 auto', 
+                    maxWidth: '900px', 
+                    width: '100%',
+                    background: '#ffffff'
+                  }} 
+                />
+              )}
+
+              {/* IMAGE Preview */}
+              {previewDoc.type === 'image' && !previewError && (
+                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '24px', height: '100%', overflow: 'auto', background: '#090d16' }}>
+                  <img 
+                    src={previewDoc.url} 
+                    alt={previewDoc.filename} 
+                    style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '8px', boxShadow: '0 4px 20px rgba(0,0,0,0.5)' }} 
+                  />
+                </div>
+              )}
+
+              {/* CODE / TEXT Preview */}
+              {previewDoc.type === 'code' && !previewError && !previewLoading && (
+                <div style={{ padding: '24px', maxWidth: '1000px', width: '100%', margin: '0 auto' }}>
+                  <div style={{ 
+                    background: '#090d16', 
+                    borderRadius: '8px', 
+                    border: '1px solid rgba(0, 242, 254, 0.2)', 
+                    overflow: 'hidden',
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.5)'
+                  }}>
+                    <div style={{ 
+                      padding: '10px 16px', 
+                      background: 'rgba(255,255,255,0.04)', 
+                      borderBottom: '1px solid rgba(255,255,255,0.08)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}>
+                      <span style={{ fontSize: '12.5px', fontFamily: 'var(--font-mono)', color: 'var(--neon-cyan)', fontWeight: '600' }}>
+                        {previewDoc.filename}
+                      </span>
+                      <span className="badge badge-submitted" style={{ fontSize: '10px', padding: '2px 6px' }}>
+                        SOURCE CODE
+                      </span>
+                    </div>
+                    <pre style={{ 
+                      margin: 0, 
+                      padding: '16px 20px', 
+                      fontFamily: 'var(--font-mono)', 
+                      fontSize: '13px', 
+                      lineHeight: '1.6', 
+                      color: '#e2e8f0', 
+                      whiteSpace: 'pre-wrap', 
+                      wordBreak: 'break-all',
+                      overflowX: 'auto',
+                      maxHeight: '65vh'
+                    }}>
+                      <code>{previewDoc.content}</code>
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

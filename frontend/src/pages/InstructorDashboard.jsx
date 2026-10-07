@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { 
   BookOpen, Plus, Calendar, FileSpreadsheet, Download, 
   CheckSquare, Award, ArrowRight, ShieldCheck, ShieldAlert,
-  ArrowLeft, Clock, Code, FileText, Image as ImageIcon, CheckCircle, RefreshCw,
+  ArrowLeft, Clock, Code, FileText, Image as ImageIcon, CheckCircle, RefreshCw, RotateCcw,
   School, Users, Edit2, Trash2, Search, Lock, Unlock, Filter, Monitor, Play,
   Copy, Layers, ChevronDown, ChevronRight, Eye, ExternalLink, X, FileCheck, Maximize2,
-  ChevronLeft, UserCheck, BarChart3, TrendingUp, Activity, CheckCircle2, AlertCircle
+  ChevronLeft, UserCheck, BarChart3, TrendingUp, Activity, CheckCircle2, AlertCircle,
+  Paperclip, Upload, HardDrive, FileArchive, Disc, Globe
 } from 'lucide-react'
 import { renderAsync } from 'docx-preview'
 
@@ -146,19 +148,27 @@ export const toLocalIsoInput = (dateInput) => {
 };
 
 export default function InstructorDashboard() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [labs, setLabs] = useState([])
   const [classes, setClasses] = useState([])
   const [submissions, setSubmissions] = useState([])
   const [students, setStudents] = useState([]) // For exception dropdown
   
-  // Navigation states: 'dashboard' | 'grading' | 'classes'
+  // Navigation states: 'dashboard' | 'grading' | 'classes' | 'analytics' | 'gradebook' | 'student_grading'
   const [viewState, setViewState] = useState('dashboard') 
   const [selectedLab, setSelectedLab] = useState(null)
   
+  // Grade by Student states
+  const [studentGradingClass, setStudentGradingClass] = useState(null)
+  const [studentGradingStudent, setStudentGradingStudent] = useState(null)
+  const [studentGradingLabs, setStudentGradingLabs] = useState([]) // array of { lab, submission }
+  const [studentGradingActiveLabIndex, setStudentGradingActiveLabIndex] = useState(0)
+  const [studentGradingLoading, setStudentGradingLoading] = useState(false)
+
   // Speed Grader active submission
   const [activeSubmission, setActiveSubmission] = useState(null)
   const [activeSubIndex, setActiveSubIndex] = useState(-1)
-  const [score, setScore] = useState(5.0)
+  const [score, setScore] = useState('')
   const [comment, setComment] = useState('')
   const [requestResubmit, setRequestResubmit] = useState(false)
 
@@ -171,11 +181,18 @@ export default function InstructorDashboard() {
   const [gradeTag, setGradeTag] = useState('') // Tag đầu điểm (ví dụ: Đầu điểm 1, Chuyên cần, Thực hành 1, Giữa kỳ)
   const [classId, setClassId] = useState('')
   const [deadline, setDeadline] = useState('')
-  const [allowLate, setAllowLate] = useState(true)
-  const [penaltyPerHour, setPenaltyPerHour] = useState(0.5)
-  const [maxPenalty, setMaxPenalty] = useState(30.0)
+  const [allowLate, setAllowLate] = useState(false)
+  const [penaltyPerHour, setPenaltyPerHour] = useState('')
+  const [maxPenalty, setMaxPenalty] = useState('')
   const [formFields, setFormFields] = useState([]) // Dynamic questions builder
-  const [enableVm, setEnableVm] = useState(true)
+  const [labAttachments, setLabAttachments] = useState([]) // File đính kèm tài liệu học liệu bài lab do GV cung cấp
+  const [uploadingLabAttachment, setUploadingLabAttachment] = useState(false)
+  const [enableVm, setEnableVm] = useState(false)
+  const [disableVmCopy, setDisableVmCopy] = useState(false)
+  const [disableVmPaste, setDisableVmPaste] = useState(false)
+  const [isExamMode, setIsExamMode] = useState(false)
+  const [cpuCores, setCpuCores] = useState('')
+  const [ramGb, setRamGb] = useState('')
   const [runtimeConfig, setRuntimeConfig] = useState(null)
   const [templateVmid, setTemplateVmid] = useState('')
   const [isLinkedClone, setIsLinkedClone] = useState(true)
@@ -184,13 +201,105 @@ export default function InstructorDashboard() {
   const [vmUsername, setVmUsername] = useState('')
   const [vmPassword, setVmPassword] = useState('')
   const [pveTemplates, setPveTemplates] = useState([])
-
+  // Per-Lab VM Drive D: Content Configuration
+  const [vmDriveMode, setVmDriveMode] = useState('default') // 'default' | 'custom'
+  const [vmDriveFiles, setVmDriveFiles] = useState([])
+  const [availableVmTools, setAvailableVmTools] = useState([])
+  const [loadingVmTools, setLoadingVmTools] = useState(false)
+  // Lecturer VM Drive D: Files State (Private Workspace or Common Drive D:)
+  const [myVmTools, setMyVmTools] = useState([])
+  const [myVmToolScope, setMyVmToolScope] = useState('private') // 'private' | 'common'
+  const [loadingMyVmTools, setLoadingMyVmTools] = useState(false)
+  const [myVmToolFileToUpload, setMyVmToolFileToUpload] = useState(null)
+  const [myVmToolUploading, setMyVmToolUploading] = useState(false)
 
   // VM Manager Modal State
   const [showVmManagerModal, setShowVmManagerModal] = useState(false)
   const [selectedLabForVm, setSelectedLabForVm] = useState(null)
   const [studentVms, setStudentVms] = useState([])
   const [vmActionLoading, setVmActionLoading] = useState(false)
+
+  // Instructor Lab Preview State (Test lab environment, VM, guide, and dynamic questions before or after publishing)
+  const [showLabPreviewModal, setShowLabPreviewModal] = useState(false)
+  const [previewLabData, setPreviewLabData] = useState(null)
+  const [previewLabTab, setPreviewLabTab] = useState('vm') // 'vm' | 'guide' | 'form'
+  const [previewVmLoading, setPreviewVmLoading] = useState(false)
+  const [previewVmError, setPreviewVmError] = useState('')
+  const [previewGuacamoleUrl, setPreviewGuacamoleUrl] = useState('')
+  const [previewVmInfo, setPreviewVmInfo] = useState(null)
+  const [previewAnswers, setPreviewAnswers] = useState({})
+  const previewGuacRef = useRef(null)
+
+  const openLabPreview = async (lab) => {
+    setPreviewLabData(lab)
+    setPreviewLabTab(lab.enable_vm !== false ? 'vm' : 'guide')
+    setPreviewVmError('')
+    setPreviewGuacamoleUrl('')
+    setPreviewVmInfo(null)
+    setPreviewAnswers({})
+    setShowLabPreviewModal(true)
+
+    // Automatically initialize VM session if VM is enabled for this lab
+    if (lab.enable_vm !== false) {
+      launchPreviewVmSession(lab.id)
+    }
+  }
+
+  const launchPreviewVmSession = async (labId) => {
+    setPreviewVmLoading(true)
+    setPreviewVmError('')
+    setPreviewGuacamoleUrl('')
+    setPreviewVmInfo(null)
+    localStorage.removeItem('GUAC_AUTH_TOKEN')
+    sessionStorage.removeItem('GUAC_AUTH_TOKEN')
+    const token = localStorage.getItem('malsec_token')
+    try {
+      const res = await fetch(`/api/labs/${labId}/vm-session`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const contentType = res.headers.get('content-type') || ''
+      let data = {}
+      if (contentType.includes('application/json')) {
+        data = await res.json()
+      } else {
+        const rawText = await res.text()
+        if (!res.ok) {
+          throw new Error(`VM is being prepared on Proxmox (HTTP ${res.status}). Please wait 15-30s and click retry.`)
+        }
+      }
+      if (!res.ok) throw new Error(data.detail || 'Failed to establish instructor preview VM session')
+      setPreviewGuacamoleUrl(data.guacamole_url)
+      setPreviewVmInfo(data)
+    } catch (err) {
+      setPreviewVmError(err.message)
+    } finally {
+      setPreviewVmLoading(false)
+    }
+  }
+
+  const handlePreviewVmRollback = async () => {
+    if (!previewLabData) return
+    if (!window.confirm('Reset this instructor preview VM back to clean template state?')) return
+    setPreviewVmLoading(true)
+    const token = localStorage.getItem('malsec_token')
+    try {
+      const res = await fetch(`/api/labs/${previewLabData.id}/vm-rollback`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || 'Unable to reset preview VM')
+      }
+      setPreviewGuacamoleUrl('')
+      setPreviewVmInfo(null)
+      await launchPreviewVmSession(previewLabData.id)
+    } catch (err) {
+      alert('VM Reset error: ' + err.message)
+      setPreviewVmLoading(false)
+    }
+  }
 
 
 
@@ -204,9 +313,105 @@ export default function InstructorDashboard() {
         const data = await res.json()
         const templates = Array.isArray(data) ? data : []
         setPveTemplates(templates)
+        if (templates.length > 0) {
+          setTemplateVmid(current => current || String(templates[0].vmid))
+        }
       }
     } catch (err) {
       console.error("Failed to fetch PVE templates:", err)
+    }
+  }
+
+  const fetchAvailableVmTools = async () => {
+    const token = localStorage.getItem('malsec_token')
+    setLoadingVmTools(true)
+    try {
+      const res = await fetch('/api/labs/vm-tools/available-files', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setAvailableVmTools(Array.isArray(data) ? data : [])
+      }
+    } catch (err) {
+      console.error("Failed to fetch available VM tools:", err)
+    } finally {
+      setLoadingVmTools(false)
+    }
+  }
+
+  const fetchMyVmTools = async (targetScope = myVmToolScope) => {
+    const token = localStorage.getItem('malsec_token')
+    setLoadingMyVmTools(true)
+    try {
+      const res = await fetch(`/api/labs/vm-tools/my-files?scope=${encodeURIComponent(targetScope)}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setMyVmTools(Array.isArray(data) ? data : [])
+      }
+    } catch (err) {
+      console.error("Failed to fetch VM tools:", err)
+    } finally {
+      setLoadingMyVmTools(false)
+    }
+  }
+
+  const handleUploadMyVmTool = async (e) => {
+    e.preventDefault()
+    if (!myVmToolFileToUpload) return
+    setMyVmToolUploading(true)
+    setError('')
+    setSuccess('')
+    const token = localStorage.getItem('malsec_token')
+    const formData = new FormData()
+    formData.append('file', myVmToolFileToUpload)
+    formData.append('scope', myVmToolScope)
+
+    try {
+      const res = await fetch('/api/labs/vm-tools/my-files', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Failed to upload tool file')
+      const destLabel = myVmToolScope === 'common' ? 'Common Drive D: (Global)' : 'your private drive'
+      setSuccess(`File "${data.filename}" uploaded successfully to ${destLabel}!`)
+      setMyVmToolFileToUpload(null)
+      const fileInput = document.getElementById('myVmToolFileInput')
+      if (fileInput) fileInput.value = ''
+      fetchMyVmTools(myVmToolScope)
+      fetchAvailableVmTools()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setMyVmToolUploading(false)
+    }
+  }
+
+  const handleDeleteMyVmTool = async (filename) => {
+    const destLabel = myVmToolScope === 'common' ? 'Common Drive D:' : 'your private drive'
+    if (!confirm(`Are you sure you want to delete file "${filename}" from ${destLabel}?`)) return
+    setActionLoading(true)
+    setError('')
+    setSuccess('')
+    const token = localStorage.getItem('malsec_token')
+    try {
+      const res = await fetch(`/api/labs/vm-tools/my-files/${encodeURIComponent(filename)}?scope=${encodeURIComponent(myVmToolScope)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Failed to delete tool file')
+      setSuccess(data.message)
+      fetchMyVmTools(myVmToolScope)
+      fetchAvailableVmTools()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setActionLoading(false)
     }
   }
 
@@ -233,6 +438,11 @@ export default function InstructorDashboard() {
   const [extensionStudent, setExtensionStudent] = useState('')
   const [extensionDeadline, setExtensionDeadline] = useState('')
 
+  // Attachment Access Control State (Phân quyền hiển thị tài liệu đính kèm cho từng sinh viên)
+  const [showAttachmentPermModal, setShowAttachmentPermModal] = useState(false)
+  const [activeAttachmentIdx, setActiveAttachmentIdx] = useState(null)
+  const [permSearchTerm, setPermSearchTerm] = useState('')
+
   // Clone Lab State
   const [showCloneModal, setShowCloneModal] = useState(false)
   const [cloneSourceLab, setCloneSourceLab] = useState(null)
@@ -248,6 +458,8 @@ export default function InstructorDashboard() {
 
   // Instructor Classes/Students management states
   const [selectedClass, setSelectedClass] = useState(null)
+  const [activeClassTab, setActiveClassTab] = useState('labs') // 'labs' | 'students' | 'analytics' | 'gradebook'
+  const [classSearchQuery, setClassSearchQuery] = useState('')
   const [semestersList, setSemestersList] = useState([])
   const [editClassModal, setEditClassModal] = useState(false)
   const [editClassSemester, setEditClassSemester] = useState('unknown')
@@ -296,6 +508,7 @@ export default function InstructorDashboard() {
   const [actionLoading, setActionLoading] = useState(false)
   const [success, setSuccess] = useState('')
   const [error, setError] = useState('')
+  const [modalError, setModalError] = useState('')
 
   // Fetch Class Analytics (supports optional labId filter)
   const fetchClassAnalytics = async (classId, labId = '') => {
@@ -383,10 +596,10 @@ export default function InstructorDashboard() {
           row.completed_labs,
           ...visibleTags.map(t => {
             const tg = row.tag_grades?.[t]
-            if (!tg || tg.average_score === null) return '""'
+            if (!tg || tg.average_score === null) return '0'
             return tg.average_score
           }),
-          row.average_score !== null ? row.average_score : '""'
+          row.average_score !== null && row.average_score !== undefined ? row.average_score : 0
         ]
         csvLines.push(line.join(','))
       })
@@ -418,10 +631,10 @@ export default function InstructorDashboard() {
           row.completed_labs,
           ...visibleLabs.map(l => {
             const g = row.grades[String(l.id)]
-            if (!g || g.final_score === null) return '""'
+            if (!g || g.final_score === null) return '0'
             return g.final_score
           }),
-          row.average_score !== null ? row.average_score : '""'
+          row.average_score !== null && row.average_score !== undefined ? row.average_score : 0
         ]
         csvLines.push(line.join(','))
       })
@@ -493,6 +706,110 @@ export default function InstructorDashboard() {
     fetchPveTemplates()
   }, [])
 
+  // Sync state FROM URL query params on mount & when searchParams / classes / labs change
+  useEffect(() => {
+    const paramClassId = searchParams.get('classId')
+    const paramTab = searchParams.get('tab')
+    const paramView = searchParams.get('view')
+    const paramLabId = searchParams.get('labId')
+    const paramStudentId = searchParams.get('studentId')
+
+    // 1. Grading view via URL: ?view=grading&labId=123
+    if (paramView === 'grading' && paramLabId) {
+      if (labs.length > 0) {
+        const foundLab = labs.find(l => String(l.id) === String(paramLabId))
+        if (foundLab && (!selectedLab || String(selectedLab.id) !== String(paramLabId))) {
+          fetchSubmissions(foundLab)
+        }
+      }
+      return
+    }
+
+    // 2. Student grading view via URL: ?view=student_grading&classId=10&studentId=5
+    if (paramView === 'student_grading' && paramClassId && paramStudentId) {
+      if (classes.length > 0) {
+        const foundClass = classes.find(c => String(c.id) === String(paramClassId))
+        if (foundClass) {
+          const foundStudent = (foundClass.users || []).find(u => String(u.id) === String(paramStudentId)) || 
+                               allStudents.find(u => String(u.id) === String(paramStudentId)) ||
+                               { id: parseInt(paramStudentId), full_name: 'Student', username: `student_${paramStudentId}` }
+          if (!studentGradingStudent || String(studentGradingStudent.id) !== String(paramStudentId)) {
+            openStudentGrading(foundClass, foundStudent)
+          }
+        }
+      }
+      return
+    }
+
+    // 3. Analytics standalone view via URL: ?view=analytics
+    if (paramView === 'analytics') {
+      if (viewState !== 'analytics') setViewState('analytics')
+      if (paramClassId && classes.length > 0) {
+        const cId = parseInt(paramClassId)
+        if (cId && analyticsClassId !== cId) {
+          setAnalyticsClassId(cId)
+          fetchClassAnalytics(cId, '')
+        }
+      }
+      return
+    }
+
+    // 4. Gradebook standalone view via URL: ?view=gradebook
+    if (paramView === 'gradebook') {
+      if (viewState !== 'gradebook') setViewState('gradebook')
+      if (paramClassId && classes.length > 0) {
+        const cId = parseInt(paramClassId)
+        if (cId && gradebookClassId !== cId) {
+          setGradebookClassId(cId)
+          fetchClassGradebook(cId)
+        }
+      }
+      return
+    }
+
+    // 5. My VM Drive view via URL: ?view=my_drive
+    if (paramView === 'my_drive') {
+      if (viewState !== 'my_drive') setViewState('my_drive')
+      fetchMyVmTools()
+      return
+    }
+
+    // 6. Class Hub view via URL: ?classId=10&tab=labs (or students, analytics, gradebook)
+    if (paramClassId) {
+      if (viewState !== 'dashboard') setViewState('dashboard')
+      if (paramTab && ['labs', 'students', 'analytics', 'gradebook'].includes(paramTab)) {
+        if (activeClassTab !== paramTab) setActiveClassTab(paramTab)
+      }
+      if (classes.length > 0) {
+        const found = classes.find(c => String(c.id) === String(paramClassId))
+        if (found && (!selectedClass || String(selectedClass.id) !== String(paramClassId))) {
+          fetchClassDetails(found.id)
+          if (paramTab === 'analytics') {
+            setAnalyticsClassId(found.id)
+            fetchClassAnalytics(found.id, '')
+          } else if (paramTab === 'gradebook') {
+            setGradebookClassId(found.id)
+            fetchClassGradebook(found.id)
+          }
+        }
+      }
+    } else {
+      // Home classes grid
+      if (viewState === 'dashboard' && selectedClass) {
+        setSelectedClass(null)
+      }
+    }
+  }, [classes, labs, allStudents, searchParams])
+
+  // Listen to browser Back button so sub-views (grading, student_grading) and class hub return smoothly
+  useEffect(() => {
+    const handlePopState = () => {
+      // React Router searchParams update will trigger the sync effect above
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
   // Fetch Submissions for a selected Lab
   const fetchSubmissions = async (lab) => {
     setLoading(true)
@@ -508,6 +825,7 @@ export default function InstructorDashboard() {
       const data = await res.json()
       setSubmissions(data)
       setViewState('grading')
+      setSearchParams({ view: 'grading', labId: lab.id })
 
       // Fetch class students for individual extensions
       const classRes = await fetch(`/api/classes/${lab.class_id}`, {
@@ -525,6 +843,89 @@ export default function InstructorDashboard() {
     }
   }
 
+  // Fetch all labs & submissions for a specific student (Grade by Student view)
+  const openStudentGrading = async (cls, student, defaultLabIndex = 0) => {
+    if (!cls || !student) return
+    setStudentGradingLoading(true)
+    setError('')
+    setSuccess('')
+    setStudentGradingClass(cls)
+    setStudentGradingStudent(student)
+    setStudentGradingLabs([])
+    setStudentGradingActiveLabIndex(defaultLabIndex)
+    setActiveSubmission(null)
+
+    const token = localStorage.getItem('malsec_token')
+    try {
+      // Ensure class has full student list populated (Gradebook/Analytics use list view which lacks users)
+      let resolvedClass = cls
+      if (!cls.users || cls.users.length === 0) {
+        try {
+          const clsRes = await fetch(`/api/classes/${cls.id}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          })
+          if (clsRes.ok) {
+            resolvedClass = await clsRes.json()
+            setStudentGradingClass(resolvedClass)
+            const foundStudent = (resolvedClass.users || []).find(u => u.id === student.id)
+            if (foundStudent) {
+              setStudentGradingStudent(foundStudent)
+            }
+          }
+        } catch (clsErr) {
+          console.error('Failed to load class student list', clsErr)
+        }
+      }
+
+      const res = await fetch(`/api/submissions/class/${cls.id}/student/${student.id}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}))
+        throw new Error(errData.detail || 'Unable to load student labs')
+      }
+      const data = await res.json()
+      const labsData = data.labs || []
+      setStudentGradingLabs(labsData)
+      setViewState('student_grading')
+      setSearchParams({ view: 'student_grading', classId: cls.id, studentId: student.id })
+
+      // If labs available, activate the selected lab submission
+      if (labsData.length > 0) {
+        const targetIdx = defaultLabIndex >= 0 && defaultLabIndex < labsData.length ? defaultLabIndex : 0
+        setStudentGradingActiveLabIndex(targetIdx)
+        const targetPair = labsData[targetIdx]
+        if (targetPair && targetPair.submission) {
+          setActiveSubmission(targetPair.submission)
+          setSelectedLab(targetPair.lab)
+          const isSubmitted = targetPair.submission.status === 'submitted' || targetPair.submission.status === 'graded' || Object.keys(targetPair.submission.answers || {}).length > 0 || (targetPair.submission.file_attachments || []).length > 0
+          const initialScore = targetPair.submission.score !== null ? targetPair.submission.score : (isSubmitted ? '' : 0)
+          setScore(initialScore)
+          setComment(targetPair.submission.comment || '')
+          setRequestResubmit(targetPair.submission.status === 're_submit_requested')
+        }
+      }
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setStudentGradingLoading(false)
+    }
+  }
+
+  // Switch active lab when in Grade by Student view
+  const handleSelectStudentGradingLab = (pair, index) => {
+    setStudentGradingActiveLabIndex(index)
+    setSelectedLab(pair.lab)
+    setActiveSubmission(pair.submission)
+    if (pair.submission) {
+      const isSubmitted = pair.submission.status === 'submitted' || pair.submission.status === 'graded' || Object.keys(pair.submission.answers || {}).length > 0 || (pair.submission.file_attachments || []).length > 0
+      const initialScore = pair.submission.score !== null ? pair.submission.score : (isSubmitted ? '' : 0)
+      setScore(initialScore)
+      setComment(pair.submission.comment || '')
+      setRequestResubmit(pair.submission.status === 're_submit_requested')
+    }
+  }
+
   // Document Preview Handler (PDF / DOCX)
   const handleOpenDocPreview = async (attachment) => {
     if (!attachment || !attachment.filepath) return
@@ -534,12 +935,31 @@ export default function InstructorDashboard() {
     const ext = filename.split('.').pop().toLowerCase()
 
     setPreviewError('')
+    const isCode = ['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log'].includes(ext)
     setPreviewDoc({
       filename,
       filepath: attachment.filepath,
       url: fileUrl,
-      type: ext === 'docx' ? 'docx' : ext === 'pdf' ? 'pdf' : ['png', 'jpg', 'jpeg'].includes(ext) ? 'image' : 'other'
+      type: ext === 'docx' ? 'docx' : ext === 'pdf' ? 'pdf' : ['png', 'jpg', 'jpeg'].includes(ext) ? 'image' : isCode ? 'code' : 'other',
+      content: ''
     })
+
+    // If Code / Text, fetch text content directly
+    if (isCode) {
+      setPreviewLoading(true)
+      try {
+        const res = await fetch(fileUrl)
+        if (!res.ok) throw new Error('Unable to download source code file from server')
+        const textContent = await res.text()
+        setPreviewDoc(prev => prev ? { ...prev, content: textContent } : null)
+      } catch (err) {
+        console.error('Error loading code file:', err)
+        setPreviewError('Source code preview error: ' + err.message)
+      } finally {
+        setPreviewLoading(false)
+      }
+      return
+    }
 
     // If DOCX, fetch arrayBuffer and render via docx-preview
     if (ext === 'docx') {
@@ -591,7 +1011,9 @@ export default function InstructorDashboard() {
   const handleSelectGrading = (sub, index) => {
     setActiveSubmission(sub)
     setActiveSubIndex(index)
-    setScore(sub.score !== null ? sub.score : 10.0)
+    const isSubmitted = sub.status === 'submitted' || sub.status === 'graded' || Object.keys(sub.answers || {}).length > 0 || (sub.file_attachments || []).length > 0
+    const initialScore = sub.score !== null ? sub.score : (isSubmitted ? '' : 0)
+    setScore(initialScore)
     setComment(sub.comment || '')
     setRequestResubmit(sub.status === 're_submit_requested')
   }
@@ -600,6 +1022,10 @@ export default function InstructorDashboard() {
   const handleSaveGrade = async (e) => {
     e.preventDefault()
     if (!activeSubmission) return
+    if (score === '' || score === null || isNaN(parseFloat(score))) {
+      setError('Please enter a grade score (from 0 to 10)!')
+      return
+    }
     setActionLoading(true)
     setError('')
     setSuccess('')
@@ -624,18 +1050,26 @@ export default function InstructorDashboard() {
 
       setSuccess(`Graded successfully for student ${data.student?.full_name}!`)
       
-      // Update local submissions list
-      const updatedList = [...submissions]
-      updatedList[activeSubIndex] = data
-      setSubmissions(updatedList)
-
-      // Auto next student submission!
-      if (activeSubIndex < submissions.length - 1) {
-        handleSelectGrading(submissions[activeSubIndex + 1], activeSubIndex + 1)
-      } else {
-        setActiveSubmission(null)
-        setActiveSubIndex(-1)
+      // Update local submissions list if in lab grading mode
+      if (activeSubIndex >= 0 && submissions.length > 0) {
+        const updatedList = [...submissions]
+        updatedList[activeSubIndex] = data
+        setSubmissions(updatedList)
       }
+
+      // Update studentGradingLabs if in student grading mode
+      if (studentGradingLabs.length > 0 && studentGradingActiveLabIndex >= 0) {
+        const updatedLabs = [...studentGradingLabs]
+        if (updatedLabs[studentGradingActiveLabIndex]) {
+          updatedLabs[studentGradingActiveLabIndex] = {
+            ...updatedLabs[studentGradingActiveLabIndex],
+            submission: data
+          }
+          setStudentGradingLabs(updatedLabs)
+        }
+      }
+
+      setActiveSubmission(data)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -663,6 +1097,7 @@ export default function InstructorDashboard() {
     if (!selectedLab || !extensionStudent || !extensionDeadline) return
     setActionLoading(true)
     setError('')
+    setModalError('')
     setSuccess('')
     const token = localStorage.getItem('malsec_token')
 
@@ -685,7 +1120,7 @@ export default function InstructorDashboard() {
       setExtensionStudent('')
       setExtensionDeadline('')
     } catch (err) {
-      setError(err.message)
+      setModalError(err.message)
     } finally {
       setActionLoading(false)
     }
@@ -696,9 +1131,9 @@ export default function InstructorDashboard() {
     const newField = {
       id: `q_${Date.now()}`,
       type,
-      label: type === 'text' ? 'MD5/SHA256 Hash' : type === 'textarea' ? 'Mechanism Analysis / Assembly' : type === 'select' ? 'Malware Classification (Single Choice)' : type === 'checkbox' ? 'Malicious Behaviors (Multiple Choice)' : 'Wireshark Screenshot',
+      label: '',
       required: true,
-      options: type === 'select' || type === 'checkbox' ? ['Ransomware (Encryption)', 'Trojan/Spyware (Information Stealer)', 'Worm (Network Propagation)', 'Rootkit (Stealth Persistence)'] : []
+      options: type === 'select' || type === 'checkbox' ? [''] : []
     }
     setFormFields([...formFields, newField])
   }
@@ -723,30 +1158,73 @@ export default function InstructorDashboard() {
 
   const addFieldOption = (fieldIndex) => {
     const updated = [...formFields]
-    updated[fieldIndex].options.push('New option')
+    updated[fieldIndex].options.push('')
     setFormFields(updated)
+  }
+
+  // Upload attachment file for lab (Instructor)
+  const handleLabAttachmentUpload = async (e) => {
+    const files = Array.from(e.target.files || [])
+    if (files.length === 0) return
+
+    setUploadingLabAttachment(true)
+    setError('')
+    setSuccess('')
+    const token = localStorage.getItem('malsec_token')
+
+    try {
+      const uploadedList = []
+      for (const file of files) {
+        const formData = new FormData()
+        formData.append('file', file)
+
+        const res = await fetch('/api/labs/upload-attachment', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData
+        })
+
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || `Upload failed for file ${file.name}`)
+        uploadedList.push(data)
+      }
+
+      setLabAttachments(prev => [...prev, ...uploadedList])
+      setSuccess(`Successfully attached ${uploadedList.length} reference file(s)!`)
+      setTimeout(() => setSuccess(''), 4000)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setUploadingLabAttachment(false)
+      e.target.value = ''
+    }
+  }
+
+  const handleRemoveLabAttachment = (indexToRemove) => {
+    setLabAttachments(prev => prev.filter((_, idx) => idx !== indexToRemove))
   }
 
   const handleSaveLab = async (e) => {
     e.preventDefault()
-    if (formFields.length === 0) {
-      setError('Please create at least one question field for the lab report!')
+    if (!isExamMode && formFields.length === 0) {
+      setModalError('Please create at least one question field for the lab report (or enable Exam / Test Mode for in-VM Word report)!')
       return
     }
     if (enableVm && !editingLab && !vmPassword) {
-      setError('Please enter a password for the VM connection!')
+      setModalError('Please enter a password for the VM connection!')
       return
     }
     if (enableVm && (!templateVmid || !vmProtocol || !vmPort)) {
-      setError('VM template, protocol, or port configuration is incomplete!')
+      setModalError('VM template, protocol, or port configuration is incomplete!')
       return
     }
     if (enableVm && vmProtocol !== 'vnc' && !vmUsername.trim()) {
-      setError('Please enter a username for RDP/SSH connection!')
+      setModalError('Please enter a username for RDP/SSH connection!')
       return
     }
     setActionLoading(true)
     setError('')
+    setModalError('')
     setSuccess('')
     const token = localStorage.getItem('malsec_token')
 
@@ -757,15 +1235,23 @@ export default function InstructorDashboard() {
         description: labDesc,
         grade_tag: gradeTag.trim() || 'Default',
         form_fields: formFields,
+        attachment_files: labAttachments,
         deadline: deadlinePayload,
         late_policy: {
           allow_late: allowLate,
-          penalty_per_hour_percent: parseFloat(penaltyPerHour),
-          max_penalty_percent: parseFloat(maxPenalty)
+          penalty_per_hour_percent: allowLate && penaltyPerHour !== '' ? parseFloat(penaltyPerHour) : 0,
+          max_penalty_percent: allowLate && maxPenalty !== '' ? parseFloat(maxPenalty) : 0
         },
         class_id: parseInt(classId),
         is_active: true,
-        enable_vm: enableVm
+        enable_vm: enableVm,
+        vm_drive_mode: vmDriveMode,
+        vm_drive_files: vmDriveMode === 'custom' ? vmDriveFiles : [],
+        disable_vm_copy: disableVmCopy,
+        disable_vm_paste: disableVmPaste,
+        is_exam_mode: isExamMode,
+        cpu_cores: cpuCores ? parseInt(cpuCores) : null,
+        ram_mb: ramGb ? Math.round(parseFloat(ramGb) * 1024) : null
       }
       if (enableVm) {
         payload.template_vmid = parseInt(templateVmid)
@@ -774,6 +1260,11 @@ export default function InstructorDashboard() {
         payload.vm_port = parseInt(vmPort)
         payload.vm_username = vmUsername.trim()
         if (vmPassword) payload.vm_password = vmPassword
+        payload.disable_vm_copy = disableVmCopy
+        payload.disable_vm_paste = disableVmPaste
+        payload.is_exam_mode = isExamMode
+        payload.cpu_cores = cpuCores ? parseInt(cpuCores) : null
+        payload.ram_mb = ramGb ? Math.round(parseFloat(ramGb) * 1024) : null
       }
 
       let res
@@ -805,7 +1296,7 @@ export default function InstructorDashboard() {
       fetchData()
       resetLabForm()
     } catch (err) {
-      setError(err.message)
+      setModalError(err.message)
     } finally {
       setActionLoading(false)
     }
@@ -817,16 +1308,16 @@ export default function InstructorDashboard() {
     setLabDesc('')
     setGradeTag('')
     setDeadline('')
-    setAllowLate(true)
-    setPenaltyPerHour(0.5)
-    setMaxPenalty(30.0)
+    setAllowLate(false)
+    setPenaltyPerHour('')
+    setMaxPenalty('')
     setFormFields([])
-    setEnableVm(true)
+    setLabAttachments([])
+    setEnableVm(false)
     setIsLinkedClone(true)
-    const configuredProtocol = runtimeConfig?.vm?.default_protocol || 'rdp'
-    setTemplateVmid(runtimeConfig?.vm?.default_template_vmid || 1001)
-    setVmProtocol(configuredProtocol)
-    setVmPort(runtimeConfig?.vm?.protocol_ports?.[configuredProtocol] || 3389)
+    setTemplateVmid('')
+    setVmProtocol('')
+    setVmPort('')
     setVmUsername('')
     setVmPassword('')
   }
@@ -838,23 +1329,33 @@ export default function InstructorDashboard() {
     setGradeTag('')
     setClassId(classes[0]?.id || '')
     setDeadline('')
-    setAllowLate(true)
-    setPenaltyPerHour(0.5)
-    setMaxPenalty(30.0)
-    setEnableVm(true)
+    setAllowLate(false)
+    setPenaltyPerHour('')
+    setMaxPenalty('')
+    setEnableVm(false)
+    setDisableVmCopy(false)
+    setDisableVmPaste(false)
+    setIsExamMode(false)
+    setCpuCores('')
+    setRamGb('')
     setIsLinkedClone(true)
-    const defaultProtocol = runtimeConfig?.vm?.default_protocol || ''
-    setTemplateVmid(runtimeConfig?.vm?.default_template_vmid || pveTemplates[0]?.vmid || '')
-    setVmProtocol(defaultProtocol)
-    setVmPort(runtimeConfig?.vm?.protocol_ports?.[defaultProtocol] || '')
+
+    const defaultProto = runtimeConfig?.vm?.default_protocol || 'rdp'
+    const defaultTpl = runtimeConfig?.vm?.default_template_vmid || (pveTemplates[0]?.vmid ? String(pveTemplates[0].vmid) : '')
+    const defaultPort = runtimeConfig?.vm?.protocol_ports?.[defaultProto] || 3389
+
+    setTemplateVmid(defaultTpl)
+    setVmProtocol(defaultProto)
+    setVmPort(defaultPort)
     setVmUsername('')
     setVmPassword('')
+    setVmDriveMode('default')
+    setVmDriveFiles([])
+    setModalError('')
     fetchPveTemplates()
-    setFormFields([
-      { id: 'q_md5', type: 'text', label: 'Malware MD5/SHA256 Hash', required: true },
-      { id: 'q_asm', type: 'textarea', label: 'Mechanism Analysis & Assembly Code Excerpt', required: true },
-      { id: 'q_shot', type: 'file', label: 'Wireshark/Debugger Analysis Screenshot', required: true }
-    ])
+    fetchAvailableVmTools()
+    setLabAttachments([])
+    setFormFields([])
     setShowLabModal(true)
   }
 
@@ -875,16 +1376,26 @@ export default function InstructorDashboard() {
     setPenaltyPerHour(lab.late_policy?.penalty_per_hour_percent ?? 0.5)
     setMaxPenalty(lab.late_policy?.max_penalty_percent ?? 30.0)
     setFormFields(lab.form_fields || [])
+    setLabAttachments(lab.attachment_files || [])
     setEnableVm(lab.enable_vm !== false)
+    setDisableVmCopy(Boolean(lab.disable_vm_copy))
+    setDisableVmPaste(Boolean(lab.disable_vm_paste))
+    setIsExamMode(Boolean(lab.is_exam_mode))
+    setCpuCores(lab.cpu_cores ? String(lab.cpu_cores) : '')
+    setRamGb(lab.ram_mb ? String(Math.round(lab.ram_mb / 1024)) : '')
     setIsLinkedClone(lab.is_linked_clone !== false)
+    setVmDriveMode(lab.vm_drive_mode || 'default')
+    setVmDriveFiles(Array.isArray(lab.vm_drive_files) ? lab.vm_drive_files : [])
     const configuredProtocol = lab.vm_protocol || runtimeConfig?.vm?.default_protocol || ''
     setTemplateVmid(lab.template_vmid || runtimeConfig?.vm?.default_template_vmid || '')
     setVmProtocol(configuredProtocol)
     setVmPort(lab.vm_port || runtimeConfig?.vm?.protocol_ports?.[configuredProtocol] || '')
     setVmUsername(lab.vm_username || '')
     setVmPassword('')
+    setModalError('')
 
     fetchPveTemplates()
+    fetchAvailableVmTools()
     setShowLabModal(true)
   }
 
@@ -925,6 +1436,7 @@ export default function InstructorDashboard() {
     } else {
       setCloneNewDeadline('')
     }
+    setModalError('')
     setShowCloneModal(true)
   }
 
@@ -932,12 +1444,13 @@ export default function InstructorDashboard() {
     e.preventDefault()
     if (!cloneSourceLab) return
     if (!cloneTargetClassId) {
-      setError('Please select a target class')
+      setModalError('Please select a target class')
       return
     }
 
     setActionLoading(true)
     setError('')
+    setModalError('')
     setSuccess('')
     const token = localStorage.getItem('malsec_token')
 
@@ -968,7 +1481,7 @@ export default function InstructorDashboard() {
       setCloneSourceLab(null)
       fetchData()
     } catch (err) {
-      setError(err.message)
+      setModalError(err.message)
     } finally {
       setActionLoading(false)
     }
@@ -994,6 +1507,7 @@ export default function InstructorDashboard() {
 
   const openVmManagerModal = async (lab) => {
     setSelectedLabForVm(lab)
+    setModalError('')
     setShowVmManagerModal(true)
     fetchLabVms(lab.id)
   }
@@ -1003,6 +1517,7 @@ export default function InstructorDashboard() {
     if (action === 'purge' && !confirm(`Are you sure you want to permanently purge VM ${vmid} for student ${studentName}?\nThis VM will be 100% purged from the Proxmox cluster so the student can re-clone a clean VM.`)) return
 
     setVmActionLoading(true)
+    setModalError('')
     const token = localStorage.getItem('malsec_token')
     try {
       const res = await fetch(`/api/labs/${labId}/vms/${vmid}/control`, {
@@ -1018,7 +1533,7 @@ export default function InstructorDashboard() {
       setSuccess(data.message)
       fetchLabVms(labId)
     } catch (err) {
-      setError(err.message)
+      setModalError(err.message)
       setVmActionLoading(false)
     }
   }
@@ -1032,6 +1547,7 @@ export default function InstructorDashboard() {
     if (!confirm(confirmMsg)) return
 
     setVmActionLoading(true)
+    setModalError('')
     const token = localStorage.getItem('malsec_token')
     try {
       const res = await fetch(`/api/labs/${labId}/vms/batch-control`, {
@@ -1047,7 +1563,7 @@ export default function InstructorDashboard() {
       setSuccess(data.message)
       fetchLabVms(labId)
     } catch (err) {
-      setError(err.message)
+      setModalError(err.message)
       setVmActionLoading(false)
     }
   }
@@ -1072,6 +1588,7 @@ export default function InstructorDashboard() {
     if (!cls) return
     setEditClassSemester(cls.semester || 'unknown')
     setEditClassDesc(cls.description || '')
+    setModalError('')
     setEditClassModal(true)
   }
 
@@ -1080,6 +1597,7 @@ export default function InstructorDashboard() {
     if (!selectedClass) return
     setActionLoading(true)
     setError('')
+    setModalError('')
     setSuccess('')
     const token = localStorage.getItem('malsec_token')
 
@@ -1104,7 +1622,7 @@ export default function InstructorDashboard() {
       fetchClassDetails(selectedClass.id)
       fetchData()
     } catch (err) {
-      setError(err.message)
+      setModalError(err.message)
     } finally {
       setActionLoading(false)
     }
@@ -1211,6 +1729,7 @@ export default function InstructorDashboard() {
     setStudentEmail(student.email || '')
     setStudentIsActive(student.is_active)
     setStudentPassword('')
+    setModalError('')
     setShowStudentModal(true)
   }
 
@@ -1220,6 +1739,7 @@ export default function InstructorDashboard() {
     if (!editingStudent) return
     setActionLoading(true)
     setError('')
+    setModalError('')
     setSuccess('')
     const token = localStorage.getItem('malsec_token')
     try {
@@ -1250,7 +1770,7 @@ export default function InstructorDashboard() {
       }
       fetchData()
     } catch (err) {
-      setError(err.message)
+      setModalError(err.message)
     } finally {
       setActionLoading(false)
     }
@@ -1399,6 +1919,29 @@ export default function InstructorDashboard() {
     return Object.values(groups)
   }, [filteredLabs, classes])
 
+  // Group all instructor's classes by semester for the Google Classroom Card Grid
+  const groupedSemesterClasses = React.useMemo(() => {
+    const semMap = {}
+    classes.forEach(c => {
+      const sem = c.semester || 'unknown'
+      if (!semMap[sem]) {
+        semMap[sem] = {
+          semester: sem,
+          classes: []
+        }
+      }
+      semMap[sem].classes.push(c)
+    })
+
+    return Object.values(semMap).sort((a, b) => {
+      if (a.semester === currentSemester && b.semester !== currentSemester) return -1
+      if (b.semester === currentSemester && a.semester !== currentSemester) return 1
+      if (a.semester === 'unknown') return 1
+      if (b.semester === 'unknown') return -1
+      return b.semester.localeCompare(a.semester)
+    })
+  }, [classes, currentSemester])
+
   const toggleClassGroup = (classId) => {
     setCollapsedClassGroups(prev => ({
       ...prev,
@@ -1423,39 +1966,38 @@ export default function InstructorDashboard() {
         </div>
       )}
 
-      {error && (
+      {error && !showLabModal && !showCloneModal && !showExtensionModal && !showStudentModal && !showVmManagerModal && (
         <div className="plag-alert-banner" style={{ marginBottom: '20px' }}>
           <ShieldAlert size={18} />
           <span>{error}</span>
         </div>
       )}
 
-      {/* Tab Navigation (Only shown if not in Speed Grader/grading view) */}
-      {viewState !== 'grading' && (
+      {/* Tab Navigation (Only shown if not in Speed Grader/grading view or student_grading view) */}
+      {viewState !== 'grading' && viewState !== 'student_grading' && (
         <div style={{ display: 'flex', gap: '12px', borderBottom: '1px solid var(--border-color)', paddingBottom: '1px', marginBottom: '24px' }}>
           <button 
-            onClick={() => setViewState('dashboard')} 
+            onClick={() => {
+              setViewState('dashboard')
+              setSelectedClass(null)
+              setSearchParams({})
+            }} 
             className={`btn ${viewState === 'dashboard' ? 'btn-primary' : 'btn-secondary'}`}
             style={{ padding: '8px 16px' }}
           >
-            <BookOpen size={16} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
-            Lab Management
-          </button>
-          <button 
-            onClick={() => setViewState('classes')} 
-            className={`btn ${viewState === 'classes' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '8px 16px' }}
-          >
             <School size={16} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
-            Classes & Students
+            {selectedClass ? 'Class Hub' : 'My Classes & Labs'}
           </button>
           <button 
             onClick={() => {
               setViewState('analytics')
-              if (analyticsClassId) fetchClassAnalytics(analyticsClassId, analyticsLabFilter)
-              else if (classes.length > 0) {
-                setAnalyticsClassId(classes[0].id)
-                fetchClassAnalytics(classes[0].id, '')
+              const targetClassId = selectedClass ? selectedClass.id : (analyticsClassId || (classes.length > 0 ? classes[0].id : ''))
+              if (targetClassId) {
+                setAnalyticsClassId(targetClassId)
+                fetchClassAnalytics(targetClassId, '')
+                setSearchParams({ view: 'analytics', classId: targetClassId })
+              } else {
+                setSearchParams({ view: 'analytics' })
               }
             }} 
             className={`btn ${viewState === 'analytics' ? 'btn-primary' : 'btn-secondary'}`}
@@ -1468,10 +2010,13 @@ export default function InstructorDashboard() {
           <button 
             onClick={() => {
               setViewState('gradebook')
-              const targetClassId = gradebookClassId || (classes.length > 0 ? classes[0].id : '')
+              const targetClassId = selectedClass ? selectedClass.id : (gradebookClassId || (classes.length > 0 ? classes[0].id : ''))
               if (targetClassId) {
-                if (!gradebookClassId) setGradebookClassId(targetClassId)
+                setGradebookClassId(targetClassId)
                 fetchClassGradebook(targetClassId)
+                setSearchParams({ view: 'gradebook', classId: targetClassId })
+              } else {
+                setSearchParams({ view: 'gradebook' })
               }
             }} 
             className={`btn ${viewState === 'gradebook' ? 'btn-primary' : 'btn-secondary'}`}
@@ -1482,7 +2027,26 @@ export default function InstructorDashboard() {
           </button>
           
           <button 
-            onClick={fetchData} 
+            onClick={() => {
+              setViewState('my_drive')
+              fetchMyVmTools()
+              setSearchParams({ view: 'my_drive' })
+            }} 
+            className={`btn ${viewState === 'my_drive' ? 'btn-primary' : 'btn-secondary'}`}
+            style={{ padding: '8px 16px' }}
+          >
+            <HardDrive size={16} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
+            My VM Drive Tools
+          </button>
+          
+          <button 
+            onClick={() => {
+              if (viewState === 'my_drive') {
+                fetchMyVmTools()
+              } else {
+                fetchData()
+              }
+            }} 
             className="btn btn-secondary" 
             style={{ marginLeft: 'auto', padding: '8px 12px' }}
             title="Refresh data"
@@ -1492,698 +2056,1405 @@ export default function InstructorDashboard() {
         </div>
       )}
 
-      {/* VIEW 1: MAIN INSTRUTOR DASHBOARD */}
+      {/* VIEW 1: MAIN INSTRUCTOR DASHBOARD (GOOGLE CLASSROOM GRID OR SELECTED CLASS HUB) */}
       {viewState === 'dashboard' && (
         <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+          {!selectedClass ? (
+            /* ========================================================================= */
+            /* MODE A: SEMESTER-GROUPED GOOGLE CLASSROOM CARD GRID                       */
+            /* ========================================================================= */
             <div>
-              <h2 style={{ fontSize: '24px', color: 'var(--text-primary)' }}>Welcome, Instructor!</h2>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Design dynamic lab assignments, grade submissions via Speed Grader, and monitor student progress.</p>
-            </div>
-            <button onClick={openCreateLabModal} className="btn btn-primary">
-              <Plus size={16} /> Design New Dynamic Lab
-            </button>
-          </div>
-
-          {/* Labs list */}
-          <div className="cyber-card">
-            <h3 style={{ fontSize: '18px', marginBottom: '18px', borderBottom: '1px solid var(--border-color)', paddingBottom: '10px' }}>
-              Instructed Labs
-            </h3>
-
-            {/* Search & Filters */}
-            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '20px', padding: '16px', background: 'rgba(0,0,0,0.1)', borderRadius: '8px', border: '1px solid var(--border-color)', alignItems: 'center' }}>
-              <div style={{ flex: 1, minWidth: '200px', position: 'relative' }}>
-                <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                <input 
-                  type="text" 
-                  className="form-input" 
-                  style={{ paddingLeft: '36px', margin: 0 }}
-                  placeholder="Search by title or description..."
-                  value={labSearchQuery}
-                  onChange={(e) => setLabSearchQuery(e.target.value)}
-                />
-              </div>
-
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-                {/* Semester Filter */}
-                {availableSemesters.length > 0 && (
-                  <select 
-                    className="form-select" 
-                    style={{ width: '150px', margin: 0 }}
-                    value={labSemesterFilter}
-                    onChange={(e) => setLabSemesterFilter(e.target.value)}
-                    title="Filter by academic semester"
-                  >
-                    <option value="all">All Semesters</option>
-                    {availableSemesters.map(sem => (
-                      <option key={sem} value={sem}>{sem === 'unknown' ? 'Unknown Semester' : `Semester ${sem}`}</option>
-                    ))}
-                  </select>
-                )}
-
-                {/* Hide Past Semesters Toggle */}
-                {availableSemesters.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => setHidePastSemesters(!hidePastSemesters)}
-                    className={`btn ${hidePastSemesters ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ padding: '6px 10px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
-                    title="Hide classes & labs from older semesters"
-                  >
-                    <Calendar size={13} />
-                    {hidePastSemesters ? 'Active Sem Only' : 'Show All Sems'}
+              {/* Header with Title, Semester Filter, Search Bar, and Create Lab CTA */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+                <div>
+                  <h2 style={{ fontSize: '24px', color: 'var(--text-primary)', margin: 0, fontWeight: '700' }}>Classes & Course Labs</h2>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '14px', margin: '4px 0 0 0' }}>
+                    Select a class to manage its lab assignments, enroll students, view academic analytics, or export gradebook.
+                  </p>
+                </div>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                  <button onClick={openCreateLabModal} className="btn btn-primary" style={{ padding: '10px 18px', fontSize: '13.5px', fontWeight: '600' }}>
+                    <Plus size={16} style={{ marginRight: '6px' }} /> Design New Dynamic Lab
                   </button>
-                )}
-
-                {/* Class Filter */}
-                <select 
-                  className="form-select" 
-                  style={{ width: '160px', margin: 0 }}
-                  value={labClassFilter}
-                  onChange={(e) => setLabClassFilter(e.target.value)}
-                >
-                  <option value="">All Classes</option>
-                  {classes
-                    .filter(c => !hidePastSemesters || (c.semester || 'unknown') === currentSemester || (c.semester || 'unknown') === 'unknown')
-                    .map(c => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} {c.semester && c.semester !== 'unknown' ? `(${c.semester})` : ''}
-                      </option>
-                    ))}
-                </select>
-
-                {/* Status Filter */}
-                <select 
-                  className="form-select" 
-                  style={{ width: '140px', margin: 0 }}
-                  value={labStatusFilter}
-                  onChange={(e) => setLabStatusFilter(e.target.value)}
-                >
-                  <option value="all">All Statuses</option>
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                </select>
-
-                {/* Sort Order */}
-                <select 
-                  className="form-select" 
-                  style={{ width: '170px', margin: 0 }}
-                  value={labSortOrder}
-                  onChange={(e) => setLabSortOrder(e.target.value)}
-                >
-                  <option value="newest">Newest</option>
-                  <option value="deadline_asc">Deadline (Earliest first)</option>
-                  <option value="deadline_desc">Deadline (Latest first)</option>
-                  <option value="title_asc">Title (A-Z)</option>
-                </select>
-
-                {/* Group By Class Toggle */}
-                <button
-                  type="button"
-                  onClick={() => setLabGroupByClass(!labGroupByClass)}
-                  className={`btn ${labGroupByClass ? 'btn-primary' : 'btn-secondary'}`}
-                  style={{ padding: '6px 12px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}
-                  title="Toggle grouping labs by semester and class"
-                >
-                  <Layers size={14} />
-                  {labGroupByClass ? 'Hierarchical Grouping' : 'Flat List'}
-                </button>
+                </div>
               </div>
-            </div>
-            
-            {/* RENDER LABS: HIERARCHICALLY GROUPED (SEMESTER -> CLASS -> LABS) OR FLAT LIST */}
-            {labGroupByClass ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                {groupedSemesters.map(semGroup => {
-                  const isSemCollapsed = !!collapsedSemesterGroups[semGroup.semester]
-                  return (
-                    <div 
-                      key={semGroup.semester}
-                      style={{ 
-                        border: '1px solid #cbd5e1', 
-                        borderRadius: '12px', 
-                        overflow: 'hidden', 
-                        background: '#ffffff',
-                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)'
-                      }}
+
+              {/* Filters Bar: Search & Semester selector */}
+              <div style={{ 
+                display: 'flex', 
+                gap: '12px', 
+                flexWrap: 'wrap', 
+                marginBottom: '28px', 
+                padding: '14px 18px', 
+                background: '#ffffff', 
+                borderRadius: '12px', 
+                border: '1px solid var(--border-color)', 
+                alignItems: 'center',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+              }}>
+                <div style={{ flex: 1, minWidth: '240px', position: 'relative' }}>
+                  <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                  <input 
+                    type="text" 
+                    className="form-input" 
+                    style={{ paddingLeft: '36px', margin: 0, background: '#f8fafc', fontSize: '13.5px' }}
+                    placeholder="Search class by name, subject code, or description..."
+                    value={classSearchQuery}
+                    onChange={(e) => setClassSearchQuery(e.target.value)}
+                  />
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  {availableSemesters.length > 0 && (
+                    <select 
+                      className="form-select" 
+                      style={{ width: '170px', margin: 0, background: '#f8fafc', fontWeight: '500' }}
+                      value={labSemesterFilter}
+                      onChange={(e) => setLabSemesterFilter(e.target.value)}
+                      title="Filter by academic semester"
                     >
-                      {/* Tier 1: Semester Header */}
+                      <option value="all">All Semesters</option>
+                      {availableSemesters.map(sem => (
+                        <option key={sem} value={sem}>{sem === 'unknown' ? 'Unknown Semester' : `Semester ${sem}`}</option>
+                      ))}
+                    </select>
+                  )}
+
+                  {availableSemesters.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setHidePastSemesters(!hidePastSemesters)}
+                      className={`btn ${hidePastSemesters ? 'btn-primary' : 'btn-secondary'}`}
+                      style={{ padding: '7px 12px', fontSize: '12.5px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                      title="Toggle hiding past semesters"
+                    >
+                      <Calendar size={14} />
+                      {hidePastSemesters ? 'Active Sem Only' : 'Show All Sems'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Semester Groups Container */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+                {groupedSemesterClasses
+                  .filter(semGroup => {
+                    if (labSemesterFilter !== 'all' && semGroup.semester !== labSemesterFilter) return false
+                    if (hidePastSemesters && semGroup.semester !== currentSemester && semGroup.semester !== 'unknown') return false
+                    return true
+                  })
+                  .map(semGroup => {
+                    const isSemCollapsed = !!collapsedSemesterGroups[semGroup.semester]
+                    
+                    // Filter classes within this semester by classSearchQuery
+                    const matchingClasses = semGroup.classes.filter(c => {
+                      if (!classSearchQuery) return true
+                      const q = classSearchQuery.toLowerCase()
+                      return (c.name && c.name.toLowerCase().includes(q)) || (c.description && c.description.toLowerCase().includes(q))
+                    })
+
+                    if (matchingClasses.length === 0) return null
+
+                    // Palette colors for Google Classroom cards
+                    const cardThemes = [
+                      { grad: 'linear-gradient(135deg, #1e40af 0%, #3b82f6 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#3b82f6' },
+                      { grad: 'linear-gradient(135deg, #065f46 0%, #10b981 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#10b981' },
+                      { grad: 'linear-gradient(135deg, #374151 0%, #4b5563 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#4b5563' },
+                      { grad: 'linear-gradient(135deg, #7c2d12 0%, #ea580c 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#ea580c' },
+                      { grad: 'linear-gradient(135deg, #581c87 0%, #8b5cf6 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#8b5cf6' },
+                      { grad: 'linear-gradient(135deg, #0f766e 0%, #06b6d4 100%)', badgeBg: 'rgba(255,255,255,0.2)', accent: '#06b6d4' }
+                    ]
+
+                    return (
                       <div 
-                        onClick={() => toggleSemesterGroup(semGroup.semester)}
+                        key={semGroup.semester}
                         style={{ 
-                          display: 'flex', 
-                          justifyContent: 'space-between', 
-                          alignItems: 'center', 
-                          padding: '12px 18px', 
-                          background: 'linear-gradient(90deg, #f1f5f9 0%, #e2e8f0 100%)', 
-                          cursor: 'pointer',
-                          borderBottom: isSemCollapsed ? 'none' : '1px solid #cbd5e1',
-                          userSelect: 'none'
+                          border: '1px solid #cbd5e1', 
+                          borderRadius: '16px', 
+                          overflow: 'hidden', 
+                          background: '#ffffff',
+                          boxShadow: '0 4px 12px -2px rgba(0, 0, 0, 0.05)'
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          {isSemCollapsed ? <ChevronRight size={18} style={{ color: 'var(--neon-cyan)' }} /> : <ChevronDown size={18} style={{ color: 'var(--neon-cyan)' }} />}
-                          <Calendar size={18} style={{ color: 'var(--neon-cyan)' }} />
-                          <span style={{ fontSize: '16px', fontWeight: 'bold', color: 'var(--text-primary)', letterSpacing: '0.3px' }}>
-                            {semGroup.semester === 'unknown' ? 'Unknown Academic Semester' : `Semester: ${semGroup.semester}`}
-                          </span>
-                          {semGroup.semester === currentSemester && (
-                            <span className="badge badge-submitted" style={{ fontSize: '10.5px', background: '#dcfce7', color: '#15803d', border: '1px solid #86efac' }}>
-                              Current Active Term
+                        {/* Semester Section Header */}
+                        <div 
+                          onClick={() => toggleSemesterGroup(semGroup.semester)}
+                          style={{ 
+                            display: 'flex', 
+                            justifyContent: 'space-between', 
+                            alignItems: 'center', 
+                            padding: '14px 20px', 
+                            background: 'linear-gradient(90deg, #f8fafc 0%, #f1f5f9 100%)', 
+                            cursor: 'pointer',
+                            borderBottom: isSemCollapsed ? 'none' : '1px solid #e2e8f0',
+                            userSelect: 'none'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            {isSemCollapsed ? <ChevronRight size={18} style={{ color: 'var(--neon-cyan)' }} /> : <ChevronDown size={18} style={{ color: 'var(--neon-cyan)' }} />}
+                            <Calendar size={18} style={{ color: 'var(--neon-cyan)' }} />
+                            <span style={{ fontSize: '17px', fontWeight: 'bold', color: 'var(--text-primary)', letterSpacing: '0.2px' }}>
+                              {semGroup.semester === 'unknown' ? 'Unknown Academic Semester' : `Semester: ${semGroup.semester}`}
                             </span>
-                          )}
+                            {semGroup.semester === currentSemester && (
+                              <span className="badge badge-submitted" style={{ fontSize: '10.5px', background: '#dcfce7', color: '#15803d', border: '1px solid #86efac', fontWeight: 'bold' }}>
+                                Current Active Term
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span className="badge badge-draft" style={{ fontSize: '12px', fontWeight: '600' }}>
+                              {matchingClasses.length} {matchingClasses.length === 1 ? 'class' : 'classes'}
+                            </span>
+                          </div>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span className="badge badge-draft" style={{ fontSize: '11.5px', fontWeight: '600' }}>
-                            {semGroup.classes.length} {semGroup.classes.length === 1 ? 'class' : 'classes'}
-                          </span>
-                          <span className="badge badge-submitted" style={{ fontSize: '11.5px', fontWeight: '600' }}>
-                            {semGroup.totalLabs} {semGroup.totalLabs === 1 ? 'lab' : 'labs'}
-                          </span>
-                        </div>
-                      </div>
 
-                      {/* Tier 2: Classes within Semester */}
-                      {!isSemCollapsed && (
-                        <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '16px', background: '#f8fafc' }}>
-                          {semGroup.classes.map(clsGroup => {
-                            const isClassCollapsed = !!collapsedClassGroups[clsGroup.classId]
-                            return (
-                              <div 
-                                key={clsGroup.classId}
-                                style={{ 
-                                  border: '1px solid var(--border-color)', 
-                                  borderRadius: '8px', 
-                                  overflow: 'hidden', 
-                                  background: '#ffffff',
-                                  boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
-                                }}
-                              >
-                                {/* Class Header */}
+                        {/* Google Classroom Cards Grid for this Semester */}
+                        {!isSemCollapsed && (
+                          <div style={{ 
+                            padding: '24px', 
+                            display: 'grid', 
+                            gridTemplateColumns: 'repeat(auto-fill, minmax(310px, 1fr))', 
+                            gap: '24px', 
+                            background: '#f8fafc' 
+                          }}>
+                            {matchingClasses.map((cls, idx) => {
+                              const theme = cardThemes[idx % cardThemes.length]
+                              const classLabs = labs.filter(l => l.class_id === cls.id)
+                              const enrolledCount = (cls.users || []).filter(u => u.role === 'student').length
+
+                              return (
                                 <div 
-                                  onClick={() => toggleClassGroup(clsGroup.classId)}
-                                  style={{ 
-                                    display: 'flex', 
-                                    justifyContent: 'space-between', 
-                                    alignItems: 'center', 
-                                    padding: '12px 16px', 
-                                    background: '#ffffff', 
+                                  key={cls.id}
+                                  onClick={() => {
+                                    fetchClassDetails(cls.id)
+                                    setActiveClassTab('labs')
+                                    setSearchParams({ classId: cls.id, tab: 'labs' })
+                                  }}
+                                  style={{
+                                    background: '#ffffff',
+                                    borderRadius: '14px',
+                                    border: '1px solid #e2e8f0',
+                                    overflow: 'hidden',
+                                    boxShadow: '0 4px 10px rgba(0, 0, 0, 0.04)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
                                     cursor: 'pointer',
-                                    borderBottom: isClassCollapsed ? 'none' : '1px solid var(--border-color)',
-                                    userSelect: 'none'
+                                    transition: 'transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease'
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    e.currentTarget.style.transform = 'translateY(-3px)'
+                                    e.currentTarget.style.boxShadow = '0 10px 24px -4px rgba(0, 0, 0, 0.1)'
+                                    e.currentTarget.style.borderColor = '#cbd5e1'
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    e.currentTarget.style.transform = 'translateY(0)'
+                                    e.currentTarget.style.boxShadow = '0 4px 10px rgba(0, 0, 0, 0.04)'
+                                    e.currentTarget.style.borderColor = '#e2e8f0'
                                   }}
                                 >
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    {isClassCollapsed ? <ChevronRight size={16} style={{ color: 'var(--text-secondary)' }} /> : <ChevronDown size={16} style={{ color: 'var(--text-secondary)' }} />}
-                                    <School size={16} style={{ color: 'var(--neon-cyan)' }} />
-                                    <span style={{ fontSize: '14.5px', fontWeight: '700', color: 'var(--text-primary)' }}>
-                                      {clsGroup.className}
-                                    </span>
-                                    {clsGroup.classDesc && (
-                                      <span style={{ fontSize: '12.5px', color: 'var(--text-secondary)' }}>
-                                        — {clsGroup.classDesc}
+                                  {/* Card Top Banner (Google Classroom colorful header) */}
+                                  <div style={{
+                                    background: theme.grad,
+                                    padding: '18px 20px',
+                                    color: '#ffffff',
+                                    position: 'relative',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    justifyContent: 'space-between',
+                                    minHeight: '100px'
+                                  }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <h3 style={{ 
+                                          fontSize: '18px', 
+                                          fontWeight: '700', 
+                                          margin: 0, 
+                                          color: '#ffffff', 
+                                          overflow: 'hidden', 
+                                          textOverflow: 'ellipsis', 
+                                          whiteSpace: 'nowrap' 
+                                        }}>
+                                          {cls.name}
+                                        </h3>
+                                        <span style={{ 
+                                          fontSize: '12px', 
+                                          color: 'rgba(255,255,255,0.85)', 
+                                          marginTop: '3px', 
+                                          display: 'inline-block',
+                                          overflow: 'hidden',
+                                          textOverflow: 'ellipsis',
+                                          whiteSpace: 'nowrap',
+                                          maxWidth: '100%'
+                                        }}>
+                                          {cls.description || 'Cybersecurity Practice Lab'}
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    {/* Semester Badge inside banner */}
+                                    <div style={{ marginTop: '12px' }}>
+                                      <span style={{
+                                        background: theme.badgeBg,
+                                        backdropFilter: 'blur(4px)',
+                                        color: '#ffffff',
+                                        fontSize: '11px',
+                                        fontWeight: '600',
+                                        padding: '3px 8px',
+                                        borderRadius: '20px',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px'
+                                      }}>
+                                        📅 {cls.semester || 'unknown'}
                                       </span>
-                                    )}
+                                    </div>
                                   </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span className="badge badge-submitted" style={{ fontSize: '11px', fontWeight: '600' }}>
-                                      {clsGroup.labs.length} {clsGroup.labs.length === 1 ? 'lab' : 'labs'}
-                                    </span>
+
+                                  {/* Card Body: Key Metrics */}
+                                  <div style={{ padding: '16px 20px', flex: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                                      <div style={{ 
+                                        padding: '10px 12px', 
+                                        background: '#f8fafc', 
+                                        borderRadius: '8px', 
+                                        border: '1px solid #f1f5f9',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '10px'
+                                      }}>
+                                        <div style={{ color: theme.accent }}>
+                                          <BookOpen size={18} />
+                                        </div>
+                                        <div>
+                                          <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)' }}>{classLabs.length}</div>
+                                          <div style={{ fontSize: '11.5px', color: 'var(--text-secondary)' }}>Lab Assignments</div>
+                                        </div>
+                                      </div>
+
+                                      <div style={{ 
+                                        padding: '10px 12px', 
+                                        background: '#f8fafc', 
+                                        borderRadius: '8px', 
+                                        border: '1px solid #f1f5f9',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '10px'
+                                      }}>
+                                        <div style={{ color: theme.accent }}>
+                                          <Users size={18} />
+                                        </div>
+                                        <div>
+                                          <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)' }}>{enrolledCount}</div>
+                                          <div style={{ fontSize: '11.5px', color: 'var(--text-secondary)' }}>Enrolled Students</div>
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {/* Upcoming or latest lab status */}
+                                    <div style={{ 
+                                      fontSize: '12px', 
+                                      color: 'var(--text-secondary)', 
+                                      display: 'flex', 
+                                      alignItems: 'center', 
+                                      gap: '6px',
+                                      marginTop: 'auto',
+                                      paddingTop: '6px'
+                                    }}>
+                                      <Clock size={13} style={{ color: 'var(--text-muted)' }} />
+                                      {classLabs.length > 0 ? (
+                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          Latest: <strong style={{ color: 'var(--text-primary)' }}>{classLabs[0].title}</strong>
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: 'var(--text-muted)' }}>No lab assignments created yet</span>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Card Footer: Quick Actions */}
+                                  <div style={{ 
+                                    padding: '10px 14px', 
+                                    background: '#ffffff', 
+                                    borderTop: '1px solid #f1f5f9',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: '6px'
+                                  }}>
+                                    <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', flex: 1 }}>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          fetchClassDetails(cls.id)
+                                          setActiveClassTab('students')
+                                          setSearchParams({ classId: cls.id, tab: 'students' })
+                                        }}
+                                        className="btn btn-secondary"
+                                        style={{ padding: '4px 7px', fontSize: '11px', background: '#f8fafc', border: '1px solid #e2e8f0', color: '#475569', whiteSpace: 'nowrap' }}
+                                        title="Manage students in this class"
+                                      >
+                                        <Users size={12} style={{ marginRight: '3px' }} /> Students
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          setAnalyticsClassId(cls.id)
+                                          fetchClassAnalytics(cls.id, '')
+                                          setViewState('analytics')
+                                          setSearchParams({ view: 'analytics', classId: cls.id })
+                                        }}
+                                        className="btn btn-secondary"
+                                        style={{ padding: '4px 7px', fontSize: '11px', background: '#f8fafc', border: '1px solid #e2e8f0', color: '#475569', whiteSpace: 'nowrap' }}
+                                        title="View Analytics for this class"
+                                      >
+                                        <BarChart3 size={12} style={{ marginRight: '3px' }} /> Analytics
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          setGradebookClassId(cls.id)
+                                          fetchClassGradebook(cls.id)
+                                          setViewState('gradebook')
+                                          setSearchParams({ view: 'gradebook', classId: cls.id })
+                                        }}
+                                        className="btn btn-secondary"
+                                        style={{ padding: '4px 7px', fontSize: '11px', background: '#f8fafc', border: '1px solid #e2e8f0', color: '#475569', whiteSpace: 'nowrap' }}
+                                        title="View Gradebook for this class"
+                                      >
+                                        <FileSpreadsheet size={12} style={{ marginRight: '3px' }} /> Gradebook
+                                      </button>
+                                    </div>
+
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '3px', color: theme.accent, fontWeight: '600', fontSize: '12px', flexShrink: 0 }}>
+                                      <ArrowRight size={14} />
+                                    </div>
                                   </div>
                                 </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
 
-                                {/* Tier 3: Labs Table */}
-                                {!isClassCollapsed && (
-                                  <div className="table-container" style={{ margin: 0, border: 'none', borderRadius: 0 }}>
-                                    <table className="cyber-table">
-                                      <thead>
-                                        <tr>
-                                          <th>Lab Assignment</th>
-                                          <th>Deadline</th>
-                                          <th>Late Penalty Policy</th>
-                                          <th>VM Provision</th>
-                                          <th>Status</th>
-                                          <th style={{ textAlign: 'right' }}>Actions & Grading</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {clsGroup.labs.map(lab => (
-                                          <tr key={lab.id}>
-                                            <td>
-                                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                                                <span className="badge" style={{ background: '#e2e8f0', color: '#334155', fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 'bold', padding: '2px 6px' }}>
-                                                  ID #{lab.id}
-                                                </span>
-                                                <span style={{ fontWeight: '600', color: 'var(--neon-cyan)' }}>{lab.title}</span>
-                                                <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '11px', fontWeight: '600', padding: '1px 6px' }}>
-                                                  🏷️ {lab.grade_tag || 'Default'}
-                                                </span>
-                                              </div>
-                                            </td>
-                                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)' }}>
-                                              {formatLocalTime(lab.deadline)}
-                                            </td>
-                                            <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                                              {lab.late_policy?.allow_late 
-                                                ? `Penalty ${lab.late_policy.penalty_per_hour_percent}% / hr (Max ${lab.late_policy.max_penalty_percent}%)` 
-                                                : 'No late submissions allowed'}
-                                            </td>
-                                            <td>
-                                              {lab.enable_vm !== false ? (
-                                                <span style={{ fontSize: '13px', fontWeight: '600', color: lab.is_linked_clone ? '#0284c7' : '#d97706', fontFamily: 'var(--font-mono)' }}>
-                                                  {lab.is_linked_clone ? '⚡ Linked' : '📦 Full'}
-                                                </span>
-                                              ) : (
-                                                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No VM</span>
-                                              )}
-                                            </td>
-                                            <td>
-                                              <span className={`badge ${lab.is_active ? 'badge-graded' : 'badge-draft'}`}>
-                                                {lab.is_active ? 'Active' : 'Inactive'}
-                                              </span>
-                                            </td>
-                                            <td style={{ textAlign: 'right' }}>
-                                              <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', alignItems: 'center' }}>
-                                                {lab.enable_vm !== false && (
-                                                  <button 
-                                                    onClick={() => openVmManagerModal(lab)} 
-                                                    className="btn btn-secondary" 
-                                                    style={{ padding: '5px 10px', fontSize: '12px', background: '#f0f9ff', border: '1px solid #bae6fd', color: '#0369a1' }}
-                                                    title="Manage & Purge Student VMs"
-                                                  >
-                                                    <Monitor size={13} style={{ marginRight: '4px' }} /> VMs
-                                                  </button>
-                                                )}
-                                                <button 
-                                                  onClick={() => openCloneModal(lab)} 
-                                                  className="btn btn-secondary" 
-                                                  style={{ padding: '5px 10px', fontSize: '12px', background: '#ecfdf5', border: '1px solid #a7f3d0', color: '#047857' }}
-                                                  title="Clone lab assignment to another class"
-                                                >
-                                                  <Copy size={13} style={{ marginRight: '4px' }} /> Clone
-                                                </button>
-                                                <button 
-                                                  onClick={() => openEditLabModal(lab)} 
-                                                  className="btn btn-secondary" 
-                                                  style={{ padding: '5px 10px', fontSize: '12px', background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#334155' }}
-                                                  title="Edit Lab"
-                                                >
-                                                  <Edit2 size={13} style={{ marginRight: '4px', color: '#475569' }} /> Edit
-                                                </button>
-                                                <button 
-                                                  onClick={() => handleDeleteLab(lab.id, lab.title)} 
-                                                  className="btn btn-danger" 
-                                                  style={{ padding: '5px 10px', fontSize: '12px' }}
-                                                  title="Delete Lab"
-                                                >
-                                                  <Trash2 size={13} style={{ marginRight: '4px' }} /> Delete
-                                                </button>
-                                                <button onClick={() => fetchSubmissions(lab)} className="btn btn-primary" style={{ padding: '5px 12px', fontSize: '12px' }}>
-                                                  Grade &rarr;
-                                                </button>
-                                              </div>
-                                            </td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-
-                {groupedSemesters.length === 0 && (
-                  <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '40px 0' }}>
-                    No labs designed yet or no labs match current filter. Click the button above to create one.
+                {classes.length === 0 && (
+                  <div className="cyber-card" style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)' }}>
+                    <School size={48} style={{ opacity: 0.3, marginBottom: '12px', color: 'var(--neon-cyan)' }} />
+                    <h3 style={{ fontSize: '18px', color: 'var(--text-primary)', marginBottom: '6px' }}>No Classes Assigned</h3>
+                    <p style={{ fontSize: '13.5px', color: 'var(--text-secondary)' }}>You are not currently assigned to any classes by the administrator.</p>
                   </div>
                 )}
               </div>
-            ) : (
-              <div className="table-container" style={{ margin: 0 }}>
-                <table className="cyber-table">
-                  <thead>
-                    <tr>
-                      <th>Lab Assignment</th>
-                      <th>Class</th>
-                      <th>Deadline</th>
-                      <th>Late Penalty Policy</th>
-                      <th>VM Provision</th>
-                      <th>Status</th>
-                      <th style={{ textAlign: 'right' }}>Actions & Grading</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredLabs.map(lab => {
-                      const cls = classes.find(c => c.id === lab.class_id)
-                      return (
-                        <tr key={lab.id}>
-                          <td>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <span className="badge" style={{ background: '#e2e8f0', color: '#334155', fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 'bold', padding: '2px 6px' }}>
-                                ID #{lab.id}
-                              </span>
-                              <span style={{ fontWeight: '600', color: 'var(--neon-cyan)' }}>{lab.title}</span>
-                            </div>
-                          </td>
-                          <td style={{ color: 'var(--text-primary)' }}>{cls ? cls.name : `Class ID ${lab.class_id}`}</td>
-                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)' }}>
-                            {formatLocalTime(lab.deadline)}
-                          </td>
-                          <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                            {lab.late_policy?.allow_late 
-                              ? `Penalty ${lab.late_policy.penalty_per_hour_percent}% / hr (Max ${lab.late_policy.max_penalty_percent}%)` 
-                              : 'No late submissions allowed'}
-                          </td>
-                          <td>
-                            {lab.enable_vm !== false ? (
-                              <span style={{ fontSize: '13px', fontWeight: '600', color: lab.is_linked_clone ? '#0284c7' : '#d97706', fontFamily: 'var(--font-mono)' }}>
-                                {lab.is_linked_clone ? '⚡ Linked' : '📦 Full'}
-                              </span>
-                            ) : (
-                              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No VM</span>
-                            )}
-                          </td>
-                          <td>
-                            <span className={`badge ${lab.is_active ? 'badge-graded' : 'badge-draft'}`}>
-                              {lab.is_active ? 'Active' : 'Inactive'}
-                            </span>
-                          </td>
-                          <td style={{ textAlign: 'right' }}>
-                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', alignItems: 'center' }}>
-                              {lab.enable_vm !== false && (
-                                <button 
-                                  onClick={() => openVmManagerModal(lab)} 
-                                  className="btn btn-secondary" 
-                                  style={{ padding: '5px 10px', fontSize: '12px', background: '#f0f9ff', border: '1px solid #bae6fd', color: '#0369a1' }}
-                                  title="Manage & Purge Student VMs"
-                                >
-                                  <Monitor size={13} style={{ marginRight: '4px' }} /> VMs
-                                </button>
-                              )}
-                                <button 
-                                  onClick={() => openCloneModal(lab)} 
-                                  className="btn btn-secondary" 
-                                  style={{ padding: '5px 10px', fontSize: '12px', background: '#ecfdf5', border: '1px solid #a7f3d0', color: '#047857' }}
-                                  title="Clone lab assignment to another class"
-                                >
-                                <Copy size={13} style={{ marginRight: '4px' }} /> Clone
-                              </button>
-                              <button 
-                                onClick={() => openEditLabModal(lab)} 
-                                className="btn btn-secondary" 
-                                style={{ padding: '5px 10px', fontSize: '12px', background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#334155' }}
-                                title="Edit Lab"
-                              >
-                                <Edit2 size={13} style={{ marginRight: '4px', color: '#475569' }} /> Edit
-                              </button>
-                              <button 
-                                onClick={() => handleDeleteLab(lab.id, lab.title)} 
-                                className="btn btn-danger" 
-                                style={{ padding: '5px 10px', fontSize: '12px' }}
-                                title="Delete Lab"
-                              >
-                                <Trash2 size={13} style={{ marginRight: '4px' }} /> Delete
-                              </button>
-                              <button onClick={() => fetchSubmissions(lab)} className="btn btn-primary" style={{ padding: '5px 12px', fontSize: '12px' }}>
-                                Grade &rarr;
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-
-                    {labs.length === 0 && (
-                      <tr>
-                        <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No labs designed yet. Click the button above to create one.</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* VIEW 3: CLASS & STUDENT MANAGEMENT */}
-      {viewState === 'classes' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '35% 65%', gap: '20px' }}>
-          
-          {/* Left Side: Classes List */}
-          <div className="cyber-card">
-            <h3 style={{ fontSize: '18px', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <School size={18} style={{ color: 'var(--neon-cyan)' }} />
-              Assigned Classes
-            </h3>
-            
-            <div className="table-container" style={{ margin: 0 }}>
-              <table className="cyber-table">
-                <thead>
-                  <tr>
-                    <th>Class Name</th>
-                    <th>Description</th>
-                    <th style={{ textAlign: 'right' }}>Students</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {classes.map(c => (
-                    <tr 
-                      key={c.id} 
-                      onClick={() => fetchClassDetails(c.id)}
-                      style={{ cursor: 'pointer', background: selectedClass?.id === c.id ? 'rgba(242, 112, 36, 0.05)' : '' }}
-                    >
-                      <td style={{ fontWeight: '600', color: 'var(--neon-cyan)' }}>
-                        <div>{c.name}</div>
-                        <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '10px', marginTop: '2px', display: 'inline-block' }}>
-                          📅 {c.semester || 'unknown'}
-                        </span>
-                      </td>
-                      <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{c.description}</td>
-                      <td style={{ textAlign: 'right' }}>
-                        <span className="badge badge-submitted">View &rarr;</span>
-                      </td>
-                    </tr>
-                  ))}
-                  {classes.length === 0 && (
-                    <tr>
-                      <td colSpan="3" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>You are not assigned to manage any classes yet.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
             </div>
-          </div>
-
-          {/* Right Side: Selected Class Details & Students List */}
-          <div className="cyber-card">
-            {selectedClass ? (
-              <div>
-                <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '16px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          ) : (
+            /* ========================================================================= */
+            /* MODE B: UNIFIED CLASS HUB (SELECTED CLASS)                                */
+            /* ========================================================================= */
+            <div>
+              {/* Back breadcrumb and Class Header */}
+              <div className="cyber-card" style={{ padding: '20px 24px', marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <h3 style={{ fontSize: '20px', color: 'var(--text-primary)', margin: 0 }}>
-                        Class: {selectedClass.name}
-                      </h3>
-                      <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '11px', fontWeight: 'bold' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedClass(null)
+                        setSearchParams({})
+                      }}
+                      className="btn btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: '12.5px', marginBottom: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px', background: '#f1f5f9', border: '1px solid #cbd5e1' }}
+                    >
+                      <ArrowLeft size={14} /> Back to All Classes
+                    </button>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                      <h2 style={{ fontSize: '24px', color: 'var(--text-primary)', margin: 0, fontWeight: '700' }}>
+                        {selectedClass.name}
+                      </h2>
+                      <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '12px', fontWeight: 'bold', padding: '4px 10px' }}>
                         📅 Semester: {selectedClass.semester || 'unknown'}
                       </span>
                     </div>
+
                     {selectedClass.description && (
-                      <p style={{ color: 'var(--text-secondary)', fontSize: '13.5px', marginTop: '6px', marginBottom: 0 }}>
+                      <p style={{ color: 'var(--text-secondary)', fontSize: '14px', margin: '6px 0 0 0' }}>
                         {selectedClass.description}
                       </p>
                     )}
                   </div>
-                  <button 
-                    onClick={() => openEditClassModal(selectedClass)}
-                    className="btn btn-secondary"
-                    style={{ padding: '6px 12px', fontSize: '12px', background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#334155', display: 'flex', alignItems: 'center', gap: '5px' }}
-                    title="Edit class semester & description"
-                  >
-                    <Edit2 size={13} />
-                    Edit Class Semester
-                  </button>
+
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setClassId(selectedClass.id)
+                        openCreateLabModal()
+                      }}
+                      className="btn btn-primary"
+                      style={{ padding: '8px 16px', fontSize: '12.5px', fontWeight: '600' }}
+                    >
+                      <Plus size={15} style={{ marginRight: '4px' }} /> Create Lab in this Class
+                    </button>
+                  </div>
                 </div>
 
-                {/* Grid for student assignment */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '24px' }}>
-                  
-                  {/* Option 1: Search & Assign Student */}
-                  <div style={{ padding: '18px', background: '#f8fafc', borderRadius: '10px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', height: '300px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-                    <h4 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--neon-cyan)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold' }}>
-                      <Search size={15} />
-                      Find & Add Student to Class
-                    </h4>
-                    
-                    <div style={{ position: 'relative', marginBottom: '12px' }}>
-                      <Search size={14} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                      <input 
-                        type="text" 
-                        className="form-input" 
-                        style={{ paddingLeft: '34px', margin: 0, fontSize: '13px', background: '#ffffff' }}
-                        placeholder="Type name or Student ID to search..."
-                        value={studentSearchQuery}
-                        onChange={(e) => setStudentSearchQuery(e.target.value)}
-                      />
-                    </div>
-                    
-                    {/* Search Results list */}
-                    <div style={{ flex: 1, overflowY: 'auto', background: '#ffffff', borderRadius: '6px', border: '1px solid var(--border-color)', padding: '8px' }}>
-                      {(() => {
-                        const existingStudentIds = new Set((selectedClass.users || []).map(u => u.id))
-                        const filteredDbStudents = allStudents.filter(s => {
-                          const matchesQuery = s.full_name.toLowerCase().includes(studentSearchQuery.toLowerCase()) || 
-                                               s.username.toLowerCase().includes(studentSearchQuery.toLowerCase())
-                          const notInClass = !existingStudentIds.has(s.id)
-                          return matchesQuery && notInClass
-                        })
+                {/* Sub-tabs within this Class: Labs, Students & Enrollment, Class Analytics, Gradebook */}
+                <div style={{ display: 'flex', gap: '8px', marginTop: '22px', borderTop: '1px solid var(--border-color)', paddingTop: '16px', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveClassTab('labs')
+                      setSearchParams({ classId: selectedClass.id, tab: 'labs' })
+                    }}
+                    className={`btn ${activeClassTab === 'labs' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '8px 16px', fontSize: '13px', fontWeight: activeClassTab === 'labs' ? '600' : '500' }}
+                  >
+                    <BookOpen size={15} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
+                    Labs ({labs.filter(l => l.class_id === selectedClass.id).length})
+                  </button>
 
-                        if (studentSearchQuery.length < 1) {
-                          return <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12.5px', padding: '24px 10px' }}>Type to search for students...</div>
-                        }
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveClassTab('students')
+                      setSearchParams({ classId: selectedClass.id, tab: 'students' })
+                    }}
+                    className={`btn ${activeClassTab === 'students' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '8px 16px', fontSize: '13px', fontWeight: activeClassTab === 'students' ? '600' : '500' }}
+                  >
+                    <Users size={15} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
+                    Students & Enrollment ({(selectedClass.users || []).filter(u => u.role === 'student').length})
+                  </button>
 
-                        if (filteredDbStudents.length === 0) {
-                          return <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12.5px', padding: '24px 10px' }}>No students found or all matched students are already enrolled.</div>
-                        }
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveClassTab('analytics')
+                      setAnalyticsClassId(selectedClass.id)
+                      setAnalyticsLabFilter('')
+                      fetchClassAnalytics(selectedClass.id, '')
+                      setSearchParams({ classId: selectedClass.id, tab: 'analytics' })
+                    }}
+                    className={`btn ${activeClassTab === 'analytics' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '8px 16px', fontSize: '13px', fontWeight: activeClassTab === 'analytics' ? '600' : '500' }}
+                  >
+                    <BarChart3 size={15} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
+                    Class Analytics
+                  </button>
 
-                        return filteredDbStudents.map(student => (
-                          <div 
-                            key={student.id} 
-                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', borderBottom: '1px solid #f1f5f9', fontSize: '13px' }}
-                          >
-                            <div>
-                              <span style={{ fontWeight: '500', color: 'var(--text-primary)' }}>{student.full_name}</span>
-                              <span style={{ color: 'var(--text-secondary)', fontSize: '11.5px', marginLeft: '6px', fontFamily: 'var(--font-mono)' }}>({student.username})</span>
-                            </div>
-                            <button 
-                              type="button" 
-                              onClick={() => handleAssignSingleStudent(student.id)} 
-                              className="btn btn-primary" 
-                              style={{ padding: '3px 10px', fontSize: '11.5px' }}
-                            >
-                              Add
-                            </button>
-                          </div>
-                        ))
-                      })()}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveClassTab('gradebook')
+                      setGradebookClassId(selectedClass.id)
+                      setSelectedStudentFilter([])
+                      setSelectedLabFilter([])
+                      setSelectedTagFilter([])
+                      fetchClassGradebook(selectedClass.id)
+                      setSearchParams({ classId: selectedClass.id, tab: 'gradebook' })
+                    }}
+                    className={`btn ${activeClassTab === 'gradebook' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '8px 16px', fontSize: '13px', fontWeight: activeClassTab === 'gradebook' ? '600' : '500' }}
+                  >
+                    <FileSpreadsheet size={15} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} />
+                    Gradebook & Export
+                  </button>
+                </div>
+              </div>
+
+              {/* TAB CONTENT 1: LABS FOR THIS CLASS */}
+              {activeClassTab === 'labs' && (
+                <div className="cyber-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
+                    <h3 style={{ fontSize: '18px', margin: 0, fontWeight: '600' }}>
+                      Lab Assignments in {selectedClass.name}
+                    </h3>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <div style={{ position: 'relative', width: '220px' }}>
+                        <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ paddingLeft: '32px', margin: 0, fontSize: '12.5px' }}
+                          placeholder="Filter labs..."
+                          value={labSearchQuery}
+                          onChange={(e) => setLabSearchQuery(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        onClick={() => {
+                          setClassId(selectedClass.id)
+                          openCreateLabModal()
+                        }}
+                        className="btn btn-primary"
+                        style={{ padding: '7px 14px', fontSize: '12.5px' }}
+                      >
+                        <Plus size={14} style={{ marginRight: '4px' }} /> New Lab
+                      </button>
                     </div>
                   </div>
 
-                  {/* Option 2: Bulk Assign by ID */}
-                  <form onSubmit={handleAssignStudentsBulk} style={{ padding: '18px', background: '#f8fafc', borderRadius: '10px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', height: '300px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-                    <h4 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--neon-cyan)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold' }}>
-                      <Users size={15} />
-                      Bulk Assign by Student IDs
-                    </h4>
-                    <div className="form-group" style={{ flex: 1, marginBottom: '12px' }}>
-                      <label className="form-label" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Enter Student IDs (comma or whitespace separated)</label>
-                      <input 
-                        type="text" 
-                        className="form-input" 
-                        style={{ fontSize: '13px', background: '#ffffff' }}
-                        placeholder="e.g. 3, 14, 25"
-                        value={studentIdsInput}
-                        onChange={(e) => setStudentIdsInput(e.target.value)}
-                      />
-                    </div>
-                    <button type="submit" className="btn btn-success" style={{ width: '100%', padding: '10px 16px', fontSize: '13.5px', fontWeight: 'bold' }} disabled={actionLoading}>
-                      {actionLoading ? 'Assigning...' : 'CONFIRM ASSIGN STUDENTS'}
-                    </button>
-                  </form>
+                  {(() => {
+                    const classLabs = labs
+                      .filter(l => l.class_id === selectedClass.id)
+                      .filter(l => {
+                        if (!labSearchQuery) return true
+                        const q = labSearchQuery.toLowerCase()
+                        return (l.title && l.title.toLowerCase().includes(q)) || (l.description && l.description.toLowerCase().includes(q))
+                      })
 
-                </div>
+                    if (classLabs.length === 0) {
+                      return (
+                        <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)' }}>
+                          <BookOpen size={40} style={{ opacity: 0.3, marginBottom: '8px', color: 'var(--neon-cyan)' }} />
+                          <p style={{ margin: 0 }}>No lab assignments found in this class yet.</p>
+                          <button
+                            onClick={() => {
+                              setClassId(selectedClass.id)
+                              openCreateLabModal()
+                            }}
+                            className="btn btn-primary"
+                            style={{ marginTop: '12px', padding: '6px 14px', fontSize: '12.5px' }}
+                          >
+                            <Plus size={14} style={{ marginRight: '4px' }} /> Create First Lab
+                          </button>
+                        </div>
+                      )
+                    }
 
-                {/* Students List in the class */}
-                {(() => {
-                  const classStudents = (selectedClass.users || []).filter(u => u.role === 'student')
-                  
-                  return (
-                    <div>
-                      <h4 style={{ fontSize: '16px', marginBottom: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Users size={16} />
-                        Enrolled Students ({classStudents.length} students)
-                      </h4>
-                      <div className="table-container" style={{ margin: 0, maxHeight: '350px', overflowY: 'auto' }}>
+                    return (
+                      <div className="table-container" style={{ margin: 0 }}>
                         <table className="cyber-table">
                           <thead>
                             <tr>
-                              <th>ID</th>
-                              <th>Student ID</th>
-                              <th>Full Name</th>
-                              <th>Email</th>
+                              <th>Lab Assignment</th>
+                              <th>Deadline</th>
+                              <th>Late Policy</th>
+                              <th>VM Provision</th>
                               <th>Status</th>
-                              <th style={{ textAlign: 'right' }}>Actions</th>
+                              <th style={{ textAlign: 'right' }}>Actions & Grading</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {classStudents.length > 0 ? (
-                              classStudents.map(student => (
-                                <tr key={student.id}>
-                                  <td>{student.id}</td>
-                                  <td style={{ fontFamily: 'var(--font-mono)' }}>{student.username}</td>
-                                  <td style={{ fontWeight: '500' }}>{student.full_name}</td>
-                                  <td>{student.email || '—'}</td>
-                                  <td>
-                                    <span style={{ 
-                                      color: student.is_active ? 'var(--neon-emerald)' : 'var(--neon-ruby)',
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: '4px',
-                                      fontSize: '13px'
-                                    }}>
-                                      {student.is_active ? <Unlock size={14} /> : <Lock size={14} />}
-                                      {student.is_active ? 'Active' : 'Locked'}
+                            {classLabs.map(lab => (
+                              <tr key={lab.id}>
+                                <td>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                    <span className="badge" style={{ background: '#e2e8f0', color: '#334155', fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 'bold', padding: '2px 6px' }}>
+                                      ID #{lab.id}
                                     </span>
-                                  </td>
-                                  <td style={{ textAlign: 'right' }}>
+                                    <span style={{ fontWeight: '600', color: 'var(--neon-cyan)' }}>{lab.title}</span>
+                                    <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '11px', fontWeight: '600', padding: '1px 6px' }}>
+                                      🏷️ {lab.grade_tag || 'Default'}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)' }}>
+                                  {formatLocalTime(lab.deadline)}
+                                </td>
+                                <td style={{ fontSize: '12.5px', color: 'var(--text-secondary)' }}>
+                                  {lab.late_policy?.allow_late 
+                                    ? `${lab.late_policy.penalty_per_hour_percent}%/h (max ${lab.late_policy.max_penalty_percent}%)` 
+                                    : <span style={{ color: 'var(--text-muted)' }}>No late</span>}
+                                </td>
+                                <td>
+                                  {lab.enable_vm !== false ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                        <span style={{ fontSize: '13px', fontWeight: '600', color: lab.is_linked_clone ? '#0284c7' : '#d97706', fontFamily: 'var(--font-mono)' }}>
+                                          {lab.is_linked_clone ? '⚡ Linked' : '📦 Full'}
+                                        </span>
+                                        {(lab.cpu_cores || lab.ram_mb) && (
+                                          <span style={{ fontSize: '10.5px', background: '#f1f5f9', color: '#475569', padding: '1px 4px', borderRadius: '4px', fontFamily: 'var(--font-mono)' }}>
+                                            {lab.cpu_cores ? `${lab.cpu_cores}C` : ''}{lab.cpu_cores && lab.ram_mb ? ' / ' : ''}{lab.ram_mb ? `${Math.round(lab.ram_mb / 1024)}GB` : ''}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {lab.is_exam_mode && (
+                                        <span style={{ fontSize: '11px', color: '#be185d', fontWeight: '700', display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                                          🎓 Exam Mode
+                                        </span>
+                                      )}
+                                      {!lab.is_exam_mode && (lab.disable_vm_copy || lab.disable_vm_paste) && (
+                                        <span style={{ fontSize: '11px', color: '#dc2626', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                                          🔒 {lab.disable_vm_copy && lab.disable_vm_paste ? 'No Copy/Paste' : lab.disable_vm_copy ? 'No Copy' : 'No Paste'}
+                                        </span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No VM</span>
+                                  )}
+                                </td>
+                                <td>
+                                  <span className={`badge ${lab.is_active ? 'badge-graded' : 'badge-draft'}`}>
+                                    {lab.is_active ? 'Active' : 'Inactive'}
+                                  </span>
+                                </td>
+                                <td style={{ textAlign: 'right' }}>
+                                  <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end', alignItems: 'center' }}>
                                     <button 
-                                      onClick={() => handleOpenStudentModal(student)} 
-                                      className="btn btn-secondary" 
-                                      style={{ padding: '4px 8px', fontSize: '12px', marginRight: '6px' }}
-                                      title="Edit details"
+                                      type="button"
+                                      onClick={() => openLabPreview(lab)} 
+                                      className="btn-icon btn-secondary" 
+                                      style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#16a34a' }}
+                                      title="Preview Lab as Student (Test VM & Questions)"
                                     >
-                                      <Edit2 size={12} />
+                                      <Eye size={15} />
+                                    </button>
+                                    {lab.enable_vm !== false && (
+                                      <button 
+                                        type="button"
+                                        onClick={() => openVmManagerModal(lab)} 
+                                        className="btn-icon btn-secondary" 
+                                        style={{ background: '#f0f9ff', border: '1px solid #bae6fd', color: '#0369a1' }}
+                                        title="Manage & Purge Student VMs"
+                                      >
+                                        <Monitor size={15} />
+                                      </button>
+                                    )}
+                                    <button 
+                                      type="button"
+                                      onClick={() => openCloneModal(lab)} 
+                                      className="btn-icon btn-secondary" 
+                                      style={{ background: '#ecfdf5', border: '1px solid #a7f3d0', color: '#047857' }}
+                                      title="Clone lab assignment to another class"
+                                    >
+                                      <Copy size={15} />
                                     </button>
                                     <button 
-                                      onClick={() => handleRemoveStudentFromClass(student.id)} 
-                                      className="btn btn-danger" 
-                                      style={{ padding: '4px 8px', fontSize: '12px' }}
-                                      title="Remove from class"
+                                      type="button"
+                                      onClick={() => openEditLabModal(lab)} 
+                                      className="btn-icon btn-secondary" 
+                                      style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#334155' }}
+                                      title="Edit Lab"
                                     >
-                                      <Trash2 size={12} />
+                                      <Edit2 size={15} />
                                     </button>
-                                  </td>
-                                </tr>
-                              ))
-                            ) : (
-                              <tr>
-                                <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>This class has no students enrolled yet.</td>
+                                    <button 
+                                      type="button"
+                                      onClick={() => handleDeleteLab(lab.id, lab.title)} 
+                                      className="btn-icon btn-danger" 
+                                      title="Delete Lab"
+                                    >
+                                      <Trash2 size={15} />
+                                    </button>
+                                    <button 
+                                      type="button"
+                                      onClick={() => fetchSubmissions(lab)} 
+                                      className="btn-icon btn-primary" 
+                                      title="Grade Student Submissions"
+                                    >
+                                      <FileCheck size={15} />
+                                    </button>
+                                  </div>
+                                </td>
                               </tr>
-                            )}
+                            ))}
                           </tbody>
                         </table>
                       </div>
+                    )
+                  })()}
+                </div>
+              )}
+
+              {/* TAB CONTENT 2: STUDENTS & ENROLLMENT FOR THIS CLASS */}
+              {activeClassTab === 'students' && (
+                <div className="cyber-card">
+                  {/* Grid for student assignment */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '28px' }}>
+                    {/* Option 1: Search & Assign Student */}
+                    <div style={{ padding: '18px', background: '#f8fafc', borderRadius: '10px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', height: '300px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                      <h4 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--neon-cyan)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold' }}>
+                        <Search size={15} />
+                        Find & Add Student to Class
+                      </h4>
+                      
+                      <div style={{ position: 'relative', marginBottom: '12px' }}>
+                        <Search size={14} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                        <input 
+                          type="text" 
+                          className="form-input" 
+                          style={{ paddingLeft: '34px', margin: 0, fontSize: '13px', background: '#ffffff' }}
+                          placeholder="Type name or Student ID to search..."
+                          value={studentSearchQuery}
+                          onChange={(e) => setStudentSearchQuery(e.target.value)}
+                        />
+                      </div>
+                      
+                      {/* Search Results list */}
+                      <div style={{ flex: 1, overflowY: 'auto', background: '#ffffff', borderRadius: '6px', border: '1px solid var(--border-color)', padding: '8px' }}>
+                        {(() => {
+                          const existingStudentIds = new Set((selectedClass.users || []).map(u => u.id))
+                          const filteredDbStudents = allStudents.filter(s => {
+                            const matchesQuery = s.full_name.toLowerCase().includes(studentSearchQuery.toLowerCase()) || 
+                                                 s.username.toLowerCase().includes(studentSearchQuery.toLowerCase())
+                            const notInClass = !existingStudentIds.has(s.id)
+                            return matchesQuery && notInClass
+                          })
+
+                          if (studentSearchQuery.length < 1) {
+                            return <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12.5px', padding: '24px 10px' }}>Type to search for students...</div>
+                          }
+
+                          if (filteredDbStudents.length === 0) {
+                            return <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12.5px', padding: '24px 10px' }}>No students found or all matched students are already enrolled.</div>
+                          }
+
+                          return filteredDbStudents.map(student => (
+                            <div 
+                              key={student.id} 
+                              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', borderBottom: '1px solid #f1f5f9', fontSize: '13px' }}
+                            >
+                              <div>
+                                <span style={{ fontWeight: '500', color: 'var(--text-primary)' }}>{student.full_name}</span>
+                                <span style={{ color: 'var(--text-secondary)', fontSize: '11.5px', marginLeft: '6px', fontFamily: 'var(--font-mono)' }}>({student.username})</span>
+                              </div>
+                              <button 
+                                type="button" 
+                                onClick={() => handleAssignSingleStudent(student.id)} 
+                                className="btn btn-primary" 
+                                style={{ padding: '3px 10px', fontSize: '11.5px' }}
+                              >
+                                Add
+                              </button>
+                            </div>
+                          ))
+                        })()}
+                      </div>
                     </div>
-                  )
-                })()}
 
-              </div>
-            ) : (
-              <div style={{ height: '350px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: '12px' }}>
-                <School size={48} style={{ opacity: 0.3, color: 'var(--neon-cyan)' }} />
-                <span>Select a class from the left table to view and manage its students.</span>
-              </div>
-            )}
-          </div>
+                    {/* Option 2: Bulk Assign by ID */}
+                    <form onSubmit={handleAssignStudentsBulk} style={{ padding: '18px', background: '#f8fafc', borderRadius: '10px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', height: '300px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                      <h4 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--neon-cyan)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold' }}>
+                        <Users size={15} />
+                        Bulk Assign by Student IDs
+                      </h4>
+                      <div className="form-group" style={{ flex: 1, marginBottom: '12px' }}>
+                        <label className="form-label" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Enter Student IDs (comma or whitespace separated)</label>
+                        <input 
+                          type="text" 
+                          className="form-input" 
+                          style={{ fontSize: '13px', background: '#ffffff' }}
+                          placeholder="e.g. 3, 14, 25"
+                          value={studentIdsInput}
+                          onChange={(e) => setStudentIdsInput(e.target.value)}
+                        />
+                      </div>
+                      <button type="submit" className="btn btn-success" style={{ width: '100%', padding: '10px 16px', fontSize: '13.5px', fontWeight: 'bold' }} disabled={actionLoading}>
+                        {actionLoading ? 'Assigning...' : 'CONFIRM ASSIGN STUDENTS'}
+                      </button>
+                    </form>
+                  </div>
 
+                  {/* Enrolled Students Table */}
+                  {(() => {
+                    const classStudents = (selectedClass.users || []).filter(u => u.role === 'student')
+                    
+                    return (
+                      <div>
+                        <h4 style={{ fontSize: '16px', marginBottom: '14px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <Users size={16} />
+                          Enrolled Students ({classStudents.length} students)
+                        </h4>
+                        <div className="table-container" style={{ margin: 0, maxHeight: '420px', overflowY: 'auto' }}>
+                          <table className="cyber-table">
+                            <thead>
+                              <tr>
+                                <th>ID</th>
+                                <th>Student ID</th>
+                                <th>Full Name</th>
+                                <th>Email</th>
+                                <th>Status</th>
+                                <th style={{ textAlign: 'right' }}>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {classStudents.length > 0 ? (
+                                classStudents.map(student => (
+                                  <tr key={student.id}>
+                                    <td>{student.id}</td>
+                                    <td style={{ fontFamily: 'var(--font-mono)' }}>{student.username}</td>
+                                    <td style={{ fontWeight: '500' }}>{student.full_name}</td>
+                                    <td>{student.email || '—'}</td>
+                                    <td>
+                                      <span style={{ 
+                                        color: student.is_active ? 'var(--neon-emerald)' : 'var(--neon-ruby)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '4px',
+                                        fontSize: '13px'
+                                      }}>
+                                        {student.is_active ? <Unlock size={14} /> : <Lock size={14} />}
+                                        {student.is_active ? 'Active' : 'Locked'}
+                                      </span>
+                                    </td>
+                                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                      <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: '5px' }}>
+                                        <button 
+                                          type="button"
+                                          onClick={() => openStudentGrading(selectedClass, student)} 
+                                          className="btn-icon btn-primary" 
+                                          title="Grade all labs for this student"
+                                        >
+                                          <FileCheck size={14} />
+                                        </button>
+                                        <button 
+                                          type="button"
+                                          onClick={() => handleOpenStudentModal(student)} 
+                                          className="btn-icon btn-secondary" 
+                                          title="Edit details"
+                                        >
+                                          <Edit2 size={14} />
+                                        </button>
+                                        <button 
+                                          type="button"
+                                          onClick={() => handleRemoveStudentFromClass(student.id)} 
+                                          className="btn-icon btn-danger" 
+                                          title="Remove from class"
+                                        >
+                                          <Trash2 size={14} />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))
+                              ) : (
+                                <tr>
+                                  <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>This class has no students enrolled yet.</td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )
+                  })()}
+                </div>
+              )}
+
+              {/* TAB CONTENT 3: CLASS ANALYTICS */}
+              {activeClassTab === 'analytics' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <label style={{ fontSize: '13px', fontWeight: '500', color: 'var(--text-secondary)' }}>Filter Lab:</label>
+                      <select
+                        className="form-select"
+                        style={{ width: '240px', margin: 0, background: '#ffffff', fontWeight: '500' }}
+                        value={analyticsLabFilter}
+                        onChange={(e) => {
+                          const lId = e.target.value
+                          setAnalyticsLabFilter(lId)
+                          fetchClassAnalytics(selectedClass.id, lId)
+                        }}
+                      >
+                        <option value="">All Labs in {selectedClass.name}</option>
+                        {labs
+                          .filter(l => l.class_id === selectedClass.id)
+                          .map(l => (
+                            <option key={l.id} value={l.id}>
+                              {l.title}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <button
+                        onClick={() => fetchClassAnalytics(selectedClass.id, analyticsLabFilter)}
+                        className="btn btn-secondary"
+                        disabled={analyticsLoading}
+                        style={{ padding: '6px 12px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                        title="Refresh Analytics"
+                      >
+                        <RefreshCw size={13} className={analyticsLoading ? 'spin-slow' : ''} />
+                        Refresh
+                      </button>
+                      <button
+                        onClick={() => {
+                          setAnalyticsClassId(selectedClass.id)
+                          fetchClassAnalytics(selectedClass.id, '')
+                          setViewState('analytics')
+                        }}
+                        className="btn btn-secondary"
+                        style={{ fontSize: '12px', padding: '6px 12px' }}
+                      >
+                        Open Full Workspace &rarr;
+                      </button>
+                    </div>
+                  </div>
+
+                  {analyticsLoading ? (
+                    <div style={{ padding: '60px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                      <RefreshCw size={32} className="spin-slow" style={{ color: 'var(--neon-cyan)', marginBottom: '12px' }} />
+                      <p style={{ fontSize: '14px' }}>Aggregating class metrics, submissions, and Proxmox VM resources...</p>
+                    </div>
+                  ) : !analyticsData ? (
+                    <div className="cyber-card" style={{ textAlign: 'center', padding: '50px' }}>
+                      <School size={48} style={{ opacity: 0.25, color: 'var(--neon-cyan)', marginBottom: '12px' }} />
+                      <p style={{ color: 'var(--text-muted)' }}>No analytics data available for this class.</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                      {/* KPI Summary Metric Cards */}
+                      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '14px' }}>
+                        <div className="stat-card">
+                          <div className="stat-icon-wrap" style={{ background: 'rgba(37, 99, 235, 0.08)', color: '#2563eb' }}>
+                            <Users size={20} />
+                          </div>
+                          <div>
+                            <div className="stat-number" style={{ color: '#1e293b' }}>{analyticsData.summary.total_students}</div>
+                            <div className="stat-label">Enrolled Students</div>
+                          </div>
+                        </div>
+
+                        <div className="stat-card">
+                          <div className="stat-icon-wrap" style={{ background: 'rgba(242, 112, 36, 0.08)', color: 'var(--neon-cyan)' }}>
+                            <BookOpen size={20} />
+                          </div>
+                          <div>
+                            <div className="stat-number" style={{ color: '#1e293b' }}>
+                              {analyticsData.selected_lab ? '1' : analyticsData.summary.total_labs}
+                            </div>
+                            <div className="stat-label">
+                              {analyticsData.selected_lab ? `Selected: ${analyticsData.selected_lab.title}` : 'Assigned Labs'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="stat-card">
+                          <div className="stat-icon-wrap" style={{ background: 'rgba(16, 185, 129, 0.08)', color: '#059669' }}>
+                            <Monitor size={20} />
+                          </div>
+                          <div>
+                            <div className="stat-number" style={{ color: '#059669' }}>
+                              {analyticsData.summary.running_vms_count}
+                            </div>
+                            <div className="stat-label">
+                              Active Running VMs ({analyticsData.summary.total_cloned_vms} allocated)
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="stat-card">
+                          <div className="stat-icon-wrap" style={{ background: 'rgba(147, 51, 234, 0.08)', color: '#9333ea' }}>
+                            <TrendingUp size={20} />
+                          </div>
+                          <div>
+                            <div className="stat-number" style={{ color: '#1e293b' }}>
+                              {analyticsData.summary.overall_submission_rate}%
+                            </div>
+                            <div className="stat-label">
+                              Submission Rate ({analyticsData.summary.total_submitted}/{analyticsData.summary.total_possible_submissions})
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="stat-card">
+                          <div className="stat-icon-wrap" style={{ background: 'rgba(245, 158, 11, 0.08)', color: '#d97706' }}>
+                            <Award size={20} />
+                          </div>
+                          <div>
+                            <div className="stat-number" style={{ color: '#1e293b' }}>
+                              {analyticsData.summary.average_score !== null ? analyticsData.summary.average_score : '—'}
+                            </div>
+                            <div className="stat-label">
+                              Class Avg Score ({analyticsData.summary.total_graded} graded)
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="stat-card">
+                          <div className="stat-icon-wrap" style={{ background: 'rgba(13, 148, 136, 0.08)', color: '#0d9488' }}>
+                            <Clock size={20} />
+                          </div>
+                          <div>
+                            <div className="stat-number" style={{ color: '#1e293b' }}>
+                              {analyticsData.summary.ontime_rate}%
+                            </div>
+                            <div className="stat-label">
+                              On-Time Rate ({analyticsData.summary.late_submissions_count} late)
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Charts - Grade Distribution & Lab Performance */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 35%) 1fr', gap: '18px' }}>
+                        {/* Chart 1: Grade Distribution */}
+                        <div className="cyber-card">
+                          <h4 style={{ fontSize: '15px', fontWeight: '600', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Award size={16} style={{ color: 'var(--neon-cyan)' }} />
+                            Grade Distribution
+                          </h4>
+
+                          {analyticsData.summary.total_graded === 0 ? (
+                            <div style={{ height: '180px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                              No submissions have been graded yet.
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingTop: '6px' }}>
+                              {[
+                                { label: 'Excellent (9.0 - 10.0)', count: analyticsData.grade_distribution.excellent, color: '#10b981' },
+                                { label: 'Good (8.0 - 8.9)', count: analyticsData.grade_distribution.good, color: '#2563eb' },
+                                { label: 'Fair (6.5 - 7.9)', count: analyticsData.grade_distribution.fair, color: '#f59e0b' },
+                                { label: 'Average (5.0 - 6.4)', count: analyticsData.grade_distribution.average, color: '#ea580c' },
+                                { label: 'Poor (< 5.0)', count: analyticsData.grade_distribution.poor, color: '#dc2626' },
+                              ].map((bar, idx) => {
+                                const total = analyticsData.summary.total_graded || 1
+                                const pct = Math.round((bar.count / total) * 100)
+                                return (
+                                  <div key={idx}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '3px' }}>
+                                      <span style={{ fontWeight: '500', color: 'var(--text-primary)' }}>{bar.label}</span>
+                                      <span style={{ color: 'var(--text-secondary)', fontWeight: '600' }}>
+                                        {bar.count} ({pct}%)
+                                      </span>
+                                    </div>
+                                    <div style={{ height: '8px', width: '100%', background: '#e2e8f0', borderRadius: '4px', overflow: 'hidden' }}>
+                                      <div 
+                                        style={{ 
+                                          height: '100%', 
+                                          width: `${pct}%`, 
+                                          background: bar.color, 
+                                          borderRadius: '4px',
+                                          transition: 'width 0.5s ease' 
+                                        }} 
+                                      />
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Chart 2: Lab-by-Lab Performance Matrix */}
+                        <div className="cyber-card">
+                          <h4 style={{ fontSize: '15px', fontWeight: '600', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Activity size={16} style={{ color: 'var(--neon-cyan)' }} />
+                            Lab-by-Lab Performance
+                          </h4>
+
+                          <div className="table-container" style={{ margin: 0, maxHeight: '260px', overflowY: 'auto' }}>
+                            <table className="cyber-table" style={{ fontSize: '12px' }}>
+                              <thead>
+                                <tr>
+                                  <th>Lab Title</th>
+                                  <th>Submission Progress</th>
+                                  <th>Avg Score</th>
+                                  <th>VM Status</th>
+                                  <th>Similarity</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {analyticsData.lab_performance.map(lab => {
+                                  const isSelected = analyticsData.selected_lab && analyticsData.selected_lab.id === lab.lab_id
+                                  return (
+                                    <tr 
+                                      key={lab.lab_id}
+                                      style={isSelected ? { background: 'rgba(242, 112, 36, 0.08)', fontWeight: '600' } : {}}
+                                    >
+                                      <td style={{ fontWeight: '600', color: isSelected ? 'var(--neon-cyan)' : 'var(--text-primary)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        {isSelected && <span style={{ marginRight: '6px' }}>▶</span>}
+                                        {lab.title}
+                                      </td>
+                                      <td style={{ minWidth: '120px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                          <div style={{ flex: 1, height: '6px', background: '#e2e8f0', borderRadius: '3px', overflow: 'hidden' }}>
+                                            <div style={{ height: '100%', width: `${lab.submission_rate}%`, background: 'var(--neon-cyan)' }} />
+                                          </div>
+                                          <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{lab.submitted_count}/{lab.total_students}</span>
+                                        </div>
+                                      </td>
+                                      <td style={{ fontWeight: '700', color: lab.average_score !== null && lab.average_score >= 8 ? '#059669' : lab.average_score >= 5 ? '#d97706' : '#dc2626' }}>
+                                        {lab.average_score !== null ? lab.average_score : '—'}
+                                      </td>
+                                      <td>
+                                        <span className={`badge ${lab.running_vms > 0 ? 'badge-submitted' : 'badge-draft'}`} style={{ fontSize: '10.5px' }}>
+                                          {lab.running_vms} running
+                                        </span>
+                                      </td>
+                                      <td>
+                                        {lab.flagged_similarity_count > 0 ? (
+                                          <span style={{ color: '#dc2626', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px' }}>
+                                            <AlertTriangle size={12} /> {lab.flagged_similarity_count}
+                                          </span>
+                                        ) : (
+                                          <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>0</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  )
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* TAB CONTENT 4: GRADEBOOK & EXPORT */}
+              {activeClassTab === 'gradebook' && (
+                <div>
+                  {gradebookLoading ? (
+                    <div style={{ padding: '60px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                      <RefreshCw size={32} className="spin-slow" style={{ color: '#10b981', marginBottom: '12px' }} />
+                      <p style={{ fontSize: '14px' }}>Loading gradebook matrix...</p>
+                    </div>
+                  ) : !gradebookData ? (
+                    <div className="cyber-card" style={{ textAlign: 'center', padding: '50px' }}>
+                      <School size={48} style={{ opacity: 0.25, color: '#10b981', marginBottom: '12px' }} />
+                      <p style={{ color: 'var(--text-muted)' }}>No gradebook records available for this class.</p>
+                    </div>
+                  ) : (() => {
+                    const visibleLabs = (gradebookData.labs || []).filter(l => selectedLabFilter.length === 0 || selectedLabFilter.includes(l.id))
+                    const visibleTags = (gradebookData.tags || []).filter(t => selectedTagFilter.length === 0 || selectedTagFilter.includes(t))
+                    const filteredRows = (gradebookData.rows || []).filter(r => selectedStudentFilter.length === 0 || selectedStudentFilter.includes(r.student_id))
+
+                    return (
+                      <div>
+                        {/* Control Bar: Mode Toggle & Export Button */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+                          {/* View Mode Toggle */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>View Mode:</span>
+                            <div style={{ display: 'flex', background: '#e2e8f0', borderRadius: '6px', padding: '2px' }}>
+                              <button
+                                type="button"
+                                onClick={() => setGradebookViewMode('labs')}
+                                style={{
+                                  padding: '4px 12px',
+                                  borderRadius: '5px',
+                                  border: 'none',
+                                  fontSize: '12px',
+                                  fontWeight: '600',
+                                  cursor: 'pointer',
+                                  background: gradebookViewMode === 'labs' ? '#ffffff' : 'transparent',
+                                  color: gradebookViewMode === 'labs' ? 'var(--neon-cyan)' : 'var(--text-secondary)',
+                                  boxShadow: gradebookViewMode === 'labs' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                                }}
+                              >
+                                📄 By Labs ({gradebookData?.labs?.length || 0})
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setGradebookViewMode('tags')}
+                                style={{
+                                  padding: '4px 12px',
+                                  borderRadius: '5px',
+                                  border: 'none',
+                                  fontSize: '12px',
+                                  fontWeight: '600',
+                                  cursor: 'pointer',
+                                  background: gradebookViewMode === 'tags' ? '#ffffff' : 'transparent',
+                                  color: gradebookViewMode === 'tags' ? 'var(--neon-cyan)' : 'var(--text-secondary)',
+                                  boxShadow: gradebookViewMode === 'tags' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                                }}
+                              >
+                                🏷️ By Grade Tags ({gradebookData?.tags?.length || 0})
+                              </button>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <button
+                              type="button"
+                              onClick={() => exportGradebookToCSV(filteredRows, visibleLabs, visibleTags, gradebookViewMode)}
+                              className="btn btn-secondary"
+                              disabled={gradebookLoading || !gradebookData}
+                              style={{ padding: '6px 12px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                            >
+                              <Download size={13} /> Export CSV
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => fetchClassGradebook(selectedClass.id)}
+                              className="btn btn-secondary"
+                              disabled={gradebookLoading}
+                              style={{ padding: '6px 10px', fontSize: '12px' }}
+                              title="Refresh Gradebook"
+                            >
+                              <RefreshCw size={13} className={gradebookLoading ? 'spin-slow' : ''} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setGradebookClassId(selectedClass.id)
+                                fetchClassGradebook(selectedClass.id)
+                                setViewState('gradebook')
+                              }}
+                              className="btn btn-secondary"
+                              style={{ fontSize: '12px', padding: '6px 12px' }}
+                            >
+                              Open Full Workspace &rarr;
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Gradebook Matrix Table */}
+                        <div className="cyber-card" style={{ padding: '0', overflow: 'hidden' }}>
+                        <div className="table-container" style={{ margin: 0, maxHeight: '420px', overflowX: 'auto', overflowY: 'auto' }}>
+                          <table className="cyber-table" style={{ fontSize: '12.5px' }}>
+                            <thead style={{ position: 'sticky', top: 0, background: '#f8fafc', zIndex: 10 }}>
+                              <tr>
+                                <th style={{ width: '40px', textAlign: 'center' }}>#</th>
+                                <th style={{ minWidth: '170px', position: 'sticky', left: 0, background: '#f8fafc', zIndex: 11 }}>Student</th>
+                                <th style={{ minWidth: '100px' }}>ID</th>
+                                <th style={{ width: '80px', textAlign: 'center' }}>Progress</th>
+                                {gradebookViewMode === 'labs' ? (
+                                  visibleLabs.map(lab => (
+                                    <th key={lab.id} style={{ minWidth: '110px', textAlign: 'center' }}>
+                                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lab.title}>
+                                        {lab.title}
+                                      </div>
+                                    </th>
+                                  ))
+                                ) : (
+                                  visibleTags.map(tag => (
+                                    <th key={tag} style={{ minWidth: '110px', textAlign: 'center' }}>
+                                      🏷️ {tag}
+                                    </th>
+                                  ))
+                                )}
+                                <th style={{ width: '80px', textAlign: 'center', background: '#ecfdf5', color: '#047857' }}>GPA</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredRows.length === 0 ? (
+                                <tr>
+                                  <td colSpan={5 + (gradebookViewMode === 'labs' ? visibleLabs.length : visibleTags.length)} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '30px' }}>
+                                    No student rows matching the selected filters.
+                                  </td>
+                                </tr>
+                              ) : (
+                                filteredRows.map((row, rIdx) => (
+                                  <tr key={row.student_id}>
+                                    <td style={{ textAlign: 'center', color: 'var(--text-muted)' }}>{rIdx + 1}</td>
+                                    <td style={{ fontWeight: '600', color: 'var(--text-primary)', position: 'sticky', left: 0, background: '#ffffff', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.full_name}</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            const studentObj = (selectedClass?.users || []).find(u => u.id === row.student_id) || { id: row.student_id, full_name: row.full_name, username: row.username, role: 'student' }
+                                            openStudentGrading(selectedClass, studentObj)
+                                          }}
+                                          className="btn btn-secondary"
+                                          style={{ padding: '2px 5px', fontSize: '10.5px', display: 'inline-flex', alignItems: 'center', gap: '2px' }}
+                                          title={`Grade all labs for ${row.full_name}`}
+                                        >
+                                          <FileCheck size={11} style={{ color: 'var(--neon-cyan)' }} />
+                                        </button>
+                                      </div>
+                                    </td>
+                                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px' }}>{row.username}</td>
+                                    <td style={{ textAlign: 'center' }}>
+                                      <span style={{ fontWeight: '600', color: row.completed_labs === (gradebookData.labs?.length || 0) ? '#10b981' : 'var(--text-secondary)' }}>
+                                        {row.completed_labs}/{gradebookData.labs?.length || 0}
+                                      </span>
+                                    </td>
+
+                                    {gradebookViewMode === 'labs' ? (
+                                      visibleLabs.map(lab => {
+                                        const grade = row.grades[String(lab.id)]
+                                        if (!grade || grade.status === 'not_submitted') {
+                                          return (
+                                            <td key={lab.id} style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '11px' }}>
+                                              <span style={{ opacity: 0.5 }}>—</span>
+                                            </td>
+                                          )
+                                        }
+                                        if (grade.status === 'submitted') {
+                                          return (
+                                            <td key={lab.id} style={{ textAlign: 'center' }}>
+                                              <span className="badge badge-submitted" style={{ fontSize: '10px' }}>
+                                                Submitted
+                                              </span>
+                                            </td>
+                                          )
+                                        }
+                                        if (grade.status === 'graded') {
+                                          const sc = grade.final_score
+                                          return (
+                                            <td key={lab.id} style={{ textAlign: 'center' }}>
+                                              <span style={{ 
+                                                fontWeight: '700', 
+                                                fontSize: '12.5px',
+                                                color: sc >= 8 ? '#059669' : sc >= 5 ? '#d97706' : '#dc2626' 
+                                              }}>
+                                                {sc}
+                                              </span>
+                                              {grade.late_penalty > 0 && (
+                                                <span style={{ fontSize: '9.5px', color: '#dc2626', display: 'block' }}>
+                                                  (-{grade.late_penalty}%)
+                                                </span>
+                                              )}
+                                            </td>
+                                          )
+                                        }
+                                        return (
+                                          <td key={lab.id} style={{ textAlign: 'center', fontSize: '11px' }}>
+                                            <span className="badge badge-draft" style={{ fontSize: '10px' }}>
+                                              {grade.status}
+                                            </span>
+                                          </td>
+                                        )
+                                      })
+                                    ) : (
+                                      visibleTags.map(tag => {
+                                        const tagInfo = row.tag_grades?.[tag]
+                                        if (!tagInfo || tagInfo.average_score === null) {
+                                          return (
+                                            <td key={tag} style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '11px' }}>
+                                              <span style={{ opacity: 0.5 }}>—</span>
+                                            </td>
+                                          )
+                                        }
+                                        const sc = tagInfo.average_score
+                                        return (
+                                          <td key={tag} style={{ textAlign: 'center' }}>
+                                            <span style={{ 
+                                              fontWeight: '700', 
+                                              fontSize: '12.5px',
+                                              color: sc >= 8 ? '#059669' : sc >= 5 ? '#d97706' : '#dc2626' 
+                                            }}>
+                                              {sc}
+                                            </span>
+                                            <span style={{ fontSize: '9.5px', color: 'var(--text-muted)', display: 'block' }}>
+                                              ({tagInfo.completed_count} labs)
+                                            </span>
+                                          </td>
+                                        )
+                                      })
+                                    )}
+
+                                    <td style={{ textAlign: 'center', fontWeight: '800', fontSize: '13px', color: row.average_score >= 8 ? '#059669' : row.average_score >= 5 ? '#d97706' : '#dc2626' }}>
+                                      {row.average_score !== null ? row.average_score : '—'}
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                        </div>
+                      </div>
+                    )
+                  })()}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -2566,6 +3837,7 @@ export default function InstructorDashboard() {
                         <th>Punctuality</th>
                         <th>Average Score</th>
                         <th>Sandbox VM Status</th>
+                        <th style={{ textAlign: 'right' }}>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2631,6 +3903,22 @@ export default function InstructorDashboard() {
                                   Offline / Not created
                                 </span>
                               )}
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const matchedClass = classes.find(c => c.id === analyticsClassId)
+                                  const studentObj = (matchedClass?.users || []).find(u => u.id === st.student_id) || { id: st.student_id, full_name: st.full_name, username: st.username, role: 'student' }
+                                  if (matchedClass) {
+                                    openStudentGrading(matchedClass, studentObj)
+                                  }
+                                }}
+                                className="btn-icon btn-primary"
+                                title={`Grade all labs for ${st.full_name}`}
+                              >
+                                <FileCheck size={14} />
+                              </button>
                             </td>
                           </tr>
                         ))}
@@ -3063,7 +4351,23 @@ export default function InstructorDashboard() {
                           <tr key={row.student_id}>
                             <td style={{ textAlign: 'center', color: 'var(--text-muted)' }}>{rIdx + 1}</td>
                             <td style={{ fontWeight: '600', color: 'var(--text-primary)', position: 'sticky', left: 0, background: '#ffffff', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
-                              {row.full_name}
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                <span>{row.full_name}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const matchedClass = classes.find(c => c.id === gradebookClassId)
+                                    const studentObj = (matchedClass?.users || []).find(u => u.id === row.student_id) || { id: row.student_id, full_name: row.full_name, username: row.username, role: 'student' }
+                                    if (matchedClass) {
+                                      openStudentGrading(matchedClass, studentObj)
+                                    }
+                                  }}
+                                  className="btn-icon-sm btn-secondary"
+                                  title={`Grade all labs for ${row.full_name}`}
+                                >
+                                  <FileCheck size={13} style={{ color: 'var(--neon-cyan)' }} />
+                                </button>
+                              </div>
                             </td>
                             <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{row.username}</td>
                             <td style={{ textAlign: 'center' }}>
@@ -3174,12 +4478,277 @@ export default function InstructorDashboard() {
         </div>
       )}
 
+      {/* VIEW 5: MY VM DRIVE TOOLS (LECTURER PRIVATE DRIVE D:\ & COMMON DRIVE D:\) */}
+      {viewState === 'my_drive' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          {/* Header Banner */}
+          <div className="cyber-card" style={{ padding: '20px 24px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
+              <div>
+                <h3 style={{ fontSize: '20px', color: 'var(--text-primary)', margin: '0 0 6px 0', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <HardDrive size={22} style={{ color: 'var(--neon-cyan)' }} />
+                  VM Drive Tools Management
+                </h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '13.5px', margin: 0, maxWidth: '780px', lineHeight: 1.5 }}>
+                  Manage toolkits, malware samples, reverse engineering tools, or exercise scripts. 
+                  You can upload files directly into your <b>Private Workspace</b> (isolated from other instructors) or into the <b>Common Drive D:</b> (global shared drive accessible across all default lab environments).
+                </p>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => fetchMyVmTools(myVmToolScope)} 
+                className="btn btn-secondary" 
+                style={{ padding: '8px 14px', fontSize: '12.5px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                disabled={loadingMyVmTools}
+              >
+                <RefreshCw size={14} className={loadingMyVmTools ? 'spin-slow' : ''} />
+                Refresh Files
+              </button>
+            </div>
+          </div>
+
+          {/* Scope Selector Bar: Private Workspace vs Common Drive */}
+          <div style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            justifyContent: 'space-between',
+            flexWrap: 'wrap', 
+            gap: '12px', 
+            padding: '12px 18px', 
+            background: '#ffffff', 
+            borderRadius: '10px', 
+            border: '1px solid var(--border-color)',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '13.5px', fontWeight: '700', color: 'var(--text-primary)' }}>Storage Workspace:</span>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMyVmToolScope('private')
+                    fetchMyVmTools('private')
+                  }}
+                  className={`btn ${myVmToolScope === 'private' ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ padding: '6px 14px', fontSize: '12.5px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <HardDrive size={15} /> My Private Workspace
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMyVmToolScope('common')
+                    fetchMyVmTools('common')
+                  }}
+                  className={`btn ${myVmToolScope === 'common' ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ padding: '6px 14px', fontSize: '12.5px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <Globe size={15} /> Common Drive D: (Global)
+                </button>
+              </div>
+            </div>
+
+            <div>
+              {myVmToolScope === 'private' ? (
+                <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '11px', padding: '4px 10px', fontWeight: '600' }}>
+                  🔒 Private Workspace (Only visible to you & attached labs)
+                </span>
+              ) : (
+                <span className="badge" style={{ background: '#fef3c7', color: '#b45309', fontSize: '11px', padding: '4px 10px', fontWeight: '600' }}>
+                  🌐 Common Shared Drive D:\ (Packaged into tools-1001.iso)
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(300px, 360px) 1fr', gap: '24px', alignItems: 'flex-start' }}>
+            {/* Upload Card */}
+            <div className="cyber-card" style={{ padding: '20px' }}>
+              <h4 style={{ fontSize: '15px', color: 'var(--text-primary)', margin: '0 0 14px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Upload size={16} style={{ color: 'var(--neon-cyan)' }} />
+                Upload to {myVmToolScope === 'private' ? 'Private Drive' : 'Common Drive D:'}
+              </h4>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: 1.5 }}>
+                {myVmToolScope === 'private'
+                  ? 'Files uploaded here are stored in your personal isolated folder on Proxmox and can be attached to custom lab environments.'
+                  : 'Files uploaded here will be placed in the global tools folder and automatically rebuilt into tools-1001.iso for all student VMs.'
+                }
+              </p>
+
+              <form onSubmit={handleUploadMyVmTool}>
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <input
+                    type="file"
+                    id="myVmToolFileInput"
+                    className="form-input"
+                    style={{ padding: '8px', fontSize: '12.5px' }}
+                    onChange={(e) => setMyVmToolFileToUpload(e.target.files[0] || null)}
+                    disabled={myVmToolUploading}
+                  />
+                  {myVmToolFileToUpload && (
+                    <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)' }}>
+                      Selected: {myVmToolFileToUpload.name} ({(myVmToolFileToUpload.size / (1024 * 1024)).toFixed(2)} MB)
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  style={{ width: '100%', padding: '10px 16px', fontSize: '13px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                  disabled={!myVmToolFileToUpload || myVmToolUploading}
+                >
+                  {myVmToolUploading ? (
+                    <>
+                      <RefreshCw size={15} className="spin-slow" /> Uploading to {myVmToolScope === 'private' ? 'Private Drive' : 'Common Drive'}...
+                    </>
+                  ) : (
+                    <>
+                      <Upload size={15} /> Upload to {myVmToolScope === 'private' ? 'My Drive' : 'Common Drive D:'}
+                    </>
+                  )}
+                </button>
+              </form>
+            </div>
+
+            {/* Files List Table */}
+            <div className="cyber-card" style={{ padding: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                <div>
+                  <h4 style={{ fontSize: '15px', color: 'var(--text-primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <HardDrive size={16} style={{ color: 'var(--neon-cyan)' }} />
+                    {myVmToolScope === 'private' ? 'Private Files' : 'Common Drive D: Files'} ({myVmTools.length} {myVmTools.length === 1 ? 'file' : 'files'})
+                  </h4>
+                  <span style={{ fontSize: '11.5px', color: 'var(--text-secondary)' }}>
+                    {myVmToolScope === 'private' ? 'Isolated workspace on Proxmox hypervisor' : 'Global Drive D: storage on Proxmox hypervisor'}
+                  </span>
+                </div>
+                <span className="badge badge-submitted" style={{ fontSize: '11px', fontFamily: 'var(--font-mono)' }}>
+                  Total: {(myVmTools.reduce((acc, f) => acc + (f.size_bytes || 0), 0) / (1024 * 1024)).toFixed(2)} MB
+                </span>
+              </div>
+
+              <div className="table-container">
+                <table className="cyber-table">
+                  <thead>
+                    <tr>
+                      <th>Filename</th>
+                      <th>Size</th>
+                      {myVmToolScope === 'common' && <th>Uploaded By (Owner)</th>}
+                      <th>Last Modified</th>
+                      <th style={{ textAlign: 'right' }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {myVmTools.map((file, idx) => {
+                      const isZip = file.filename.endsWith('.zip') || file.filename.endsWith('.rar') || file.filename.endsWith('.7z')
+                      const isExe = file.filename.endsWith('.exe') || file.filename.endsWith('.msi')
+                      const sizeMb = (file.size_bytes / (1024 * 1024)).toFixed(2)
+                      const canDel = file.can_delete !== false
+                      return (
+                        <tr key={idx}>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              {isZip ? (
+                                <FileArchive size={18} style={{ color: 'var(--neon-amber)', flexShrink: 0 }} />
+                              ) : isExe ? (
+                                <Disc size={18} style={{ color: 'var(--neon-ruby)', flexShrink: 0 }} />
+                              ) : (
+                                <HardDrive size={18} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
+                              )}
+                              <span style={{ fontWeight: '500', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+                                {file.filename}
+                              </span>
+                            </div>
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px' }}>
+                            {file.size_bytes > 1024 * 1024 
+                              ? `${sizeMb} MB` 
+                              : `${(file.size_bytes / 1024).toFixed(1)} KB`}
+                          </td>
+                          {myVmToolScope === 'common' && (
+                            <td>
+                              <span style={{ 
+                                display: 'inline-flex', 
+                                alignItems: 'center', 
+                                gap: '6px', 
+                                fontSize: '12px',
+                                color: file.owner_username === 'system' ? 'var(--text-muted)' : 'var(--neon-cyan)',
+                                fontWeight: '500'
+                              }}>
+                                👤 {file.owner_name || file.owner_username || 'System'}
+                                {file.owner_username && file.owner_username !== 'system' && (
+                                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                                    (@{file.owner_username})
+                                  </span>
+                                )}
+                              </span>
+                            </td>
+                          )}
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px', color: 'var(--text-secondary)' }}>
+                            {file.updated_at || '—'}
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            {canDel ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteMyVmTool(file.filename)}
+                                className="btn btn-secondary"
+                                style={{ padding: '5px 10px', color: 'var(--neon-ruby)', borderColor: 'rgba(255, 8, 68, 0.3)', fontSize: '12px' }}
+                                title={`Delete file from ${myVmToolScope === 'private' ? 'private drive' : 'common drive'}`}
+                                disabled={actionLoading}
+                              >
+                                <Trash2 size={13} style={{ marginRight: '4px' }} /> Delete
+                              </button>
+                            ) : (
+                              <span 
+                                title="You cannot delete files uploaded by other instructors or administrators" 
+                                style={{ fontSize: '11.5px', color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'not-allowed' }}
+                              >
+                                <Lock size={12} /> Protected
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                    {myVmTools.length === 0 && (
+                      <tr>
+                        <td colSpan={myVmToolScope === 'common' ? 5 : 4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '36px 16px' }}>
+                          <HardDrive size={32} style={{ opacity: 0.3, marginBottom: '8px' }} />
+                          <div>No files found in {myVmToolScope === 'private' ? 'your private drive' : 'Common Drive D:'}.</div>
+                          <div style={{ fontSize: '12px', marginTop: '4px' }}>Upload your custom tools or malware samples using the panel on the left.</div>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* VIEW 2: SUBMISSIONS LIST & SPEED GRADER VIEW */}
       {viewState === 'grading' && selectedLab && (
         <div>
           {/* Back Navigation Bar */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
-            <button onClick={() => { setViewState('dashboard'); setActiveSubmission(null); }} className="btn btn-secondary" style={{ padding: '8px 12px' }}>
+            <button 
+              onClick={() => { 
+                setViewState('dashboard'); 
+                setActiveSubmission(null); 
+                if (selectedLab && selectedLab.class_id) {
+                  setSearchParams({ classId: selectedLab.class_id, tab: 'labs' })
+                } else if (selectedClass) {
+                  setSearchParams({ classId: selectedClass.id, tab: 'labs' })
+                } else {
+                  setSearchParams({})
+                }
+              }} 
+              className="btn btn-secondary" 
+              style={{ padding: '8px 12px' }}
+            >
               <ArrowLeft size={16} /> Back
             </button>
             <div>
@@ -3188,7 +4757,7 @@ export default function InstructorDashboard() {
             </div>
 
             <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
-              <button onClick={() => setShowExtensionModal(true)} className="btn btn-secondary">
+              <button onClick={() => { setModalError(''); setShowExtensionModal(true); }} className="btn btn-secondary">
                 <Calendar size={15} /> Individual Extension
               </button>
               <button onClick={handleExportCSV} className="btn btn-secondary">
@@ -3217,7 +4786,7 @@ export default function InstructorDashboard() {
                           activeSubmission.status === 'submitted' ? 'badge-submitted' :
                           activeSubmission.status === 'graded' ? 'badge-graded' : 'badge-resubmit'
                         }`} style={{ fontSize: '11.5px', padding: '2px 8px' }}>
-                          {activeSubmission.status === 'draft' ? 'Draft' :
+                          {activeSubmission.status === 'draft' ? (Object.keys(activeSubmission.answers || {}).length === 0 ? 'Not Submitted' : 'Draft') :
                            activeSubmission.status === 'submitted' ? 'Submitted' :
                            activeSubmission.status === 'graded' ? `Graded: ${activeSubmission.score}/10` : 'Resubmit Requested'}
                         </span>
@@ -3250,11 +4819,20 @@ export default function InstructorDashboard() {
                             }
                           }}
                         >
-                          {submissions.map((sub, idx) => (
-                            <option key={sub.id} value={idx}>
-                              {idx + 1}. {sub.student?.full_name} ({sub.student?.username}) - {sub.status === 'graded' ? `[${sub.score}/10]` : sub.status === 'submitted' ? '[Submitted]' : `[${sub.status}]`}
-                            </option>
-                          ))}
+                          {submissions.map((sub, idx) => {
+                            const subStatusLabel = sub.status === 'graded' 
+                              ? `[${sub.score}/10]` 
+                              : sub.status === 'submitted' 
+                                ? '[Submitted]' 
+                                : Object.keys(sub.answers || {}).length === 0 
+                                  ? '[Not Submitted]' 
+                                  : '[Draft]';
+                            return (
+                              <option key={sub.id} value={idx}>
+                                {idx + 1}. {sub.student?.full_name} ({sub.student?.username}) - {subStatusLabel}
+                              </option>
+                            );
+                          })}
                         </select>
                       </div>
 
@@ -3312,10 +4890,114 @@ export default function InstructorDashboard() {
                     </div>
                   )}
 
-                  {/* Render answers dynamically based on design form fields */}
-                  {selectedLab.form_fields.map((field) => {
-                    const ans = activeSubmission.answers[field.id] || ''
-                    const attachment = activeSubmission.file_attachments.find(a => a.field_id === field.id)
+                  {/* In-VM Exam Report & Attachments Display (Especially when lab has 0 form fields) */}
+                  {(selectedLab.is_exam_mode || (!selectedLab.form_fields || selectedLab.form_fields.length === 0)) && (
+                    <div style={{ marginBottom: '24px', padding: '16px', background: '#f8fafc', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <FileText size={18} style={{ color: 'var(--neon-cyan)' }} />
+                          <h4 style={{ fontSize: '15px', color: 'var(--text-primary)', margin: 0, fontWeight: '600' }}>
+                            {selectedLab.is_exam_mode ? 'In-VM Exam Report & Workspace Submissions' : 'Student Submission Attachments'}
+                          </h4>
+                        </div>
+                        {activeSubmission.file_attachments && activeSubmission.file_attachments.length > 0 && (
+                          <span className="badge badge-submitted" style={{ fontSize: '11px' }}>
+                            {activeSubmission.file_attachments.length} File(s)
+                          </span>
+                        )}
+                      </div>
+
+                      {activeSubmission.file_attachments && activeSubmission.file_attachments.length > 0 ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                          {activeSubmission.file_attachments.map((attachment, attIdx) => {
+                            const fname = attachment.original_filename || 'Attachment'
+                            const ext = (fname || '').split('.').pop().toLowerCase()
+                            const isDocx = ext === 'docx'
+                            const isZip = ext === 'zip'
+                            const isCode = ['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log'].includes(ext)
+                            const canPreview = ['pdf', 'docx', 'png', 'jpg', 'jpeg', ...['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log']].includes(ext)
+
+                            return (
+                              <div 
+                                key={attIdx} 
+                                style={{ 
+                                  display: 'flex', 
+                                  alignItems: 'center', 
+                                  justifyContent: 'space-between', 
+                                  padding: '12px 14px', 
+                                  background: isDocx ? '#eff6ff' : '#ffffff', 
+                                  borderRadius: '6px', 
+                                  border: isDocx ? '1.5px solid #3b82f6' : '1px solid var(--border-color)' 
+                                }}
+                              >
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, overflow: 'hidden' }}>
+                                  {isDocx ? (
+                                    <FileText size={20} style={{ color: '#2563eb', flexShrink: 0 }} />
+                                  ) : isZip ? (
+                                    <FileArchive size={18} style={{ color: 'var(--neon-amber)', flexShrink: 0 }} />
+                                  ) : (
+                                    <FileText size={18} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                                  )}
+                                  <div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                      <span style={{ fontWeight: '600', color: isDocx ? '#1d4ed8' : 'var(--text-primary)', wordBreak: 'break-all', fontSize: '13.5px' }}>
+                                        {fname}
+                                      </span>
+                                      {isDocx && (
+                                        <span className="badge" style={{ background: '#2563eb', color: '#ffffff', fontSize: '10px', padding: '1px 6px' }}>
+                                          WORD REPORT
+                                        </span>
+                                      )}
+                                      {isZip && (
+                                        <span className="badge" style={{ background: '#fef3c7', color: '#92400e', fontSize: '10px', padding: '1px 6px' }}>
+                                          WORKSPACE ZIP
+                                        </span>
+                                      )}
+                                    </div>
+                                    {attachment.uploaded_at && (
+                                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                                        Received: {formatLocalTime(attachment.uploaded_at)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, marginLeft: '12px' }}>
+                                  {canPreview && (
+                                    <button 
+                                      type="button" 
+                                      onClick={() => handleOpenDocPreview(attachment)} 
+                                      className="btn btn-primary" 
+                                      style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 'bold' }}
+                                    >
+                                      <Eye size={14} /> Preview
+                                    </button>
+                                  )}
+                                  <a 
+                                    href={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&download=true&token=${localStorage.getItem('malsec_token')}`} 
+                                    className="btn btn-secondary" 
+                                    style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                  >
+                                    <Download size={13} /> Download
+                                  </a>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <div style={{ textAlign: 'center', padding: '16px', color: 'var(--text-muted)', fontSize: '13px' }}>
+                          No files received from student VM workspace yet.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(selectedLab.form_fields || []).map((field) => {
+                    const ans = (activeSubmission.answers || {})[field.id] || ''
+                    const fieldAttachments = (activeSubmission.file_attachments || []).filter(a => a.field_id === field.id)
 
                     return (
                       <div key={field.id} style={{ marginBottom: '24px', paddingBottom: '16px', borderBottom: '1px dashed var(--border-color)' }}>
@@ -3362,71 +5044,86 @@ export default function InstructorDashboard() {
                           </div>
                         )}
 
-                        {/* FILE ATTACHMENTS (IMAGE OR DECRYPTED ZIP) */}
+                        {/* FILE ATTACHMENTS (IMAGE, CODE, DOCX, PDF, ZIP) */}
                         {field.type === 'file' && (
                           <div>
-                            {attachment ? (
-                              <div>
-                                <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                  File: <b>{attachment.original_filename}</b>
-                                </div>
-                                
-                                {/* Display inline if image */}
-                                {attachment.original_filename.split('.').pop().toLowerCase() in {png:1, jpg:1, jpeg:1} ? (
-                                  <div style={{ background: '#000', padding: '10px', borderRadius: '8px', display: 'inline-block', maxWidth: '100%' }}>
-                                    <img 
-                                      src={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${localStorage.getItem('malsec_token')}`} 
-                                      alt="Screenshot" 
-                                      style={{ maxWidth: '100%', maxHeight: '350px', borderRadius: '4px', border: '1px solid #374151', cursor: 'zoom-in' }} 
-                                      onClick={() => window.open(`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${localStorage.getItem('malsec_token')}`, '_blank')}
-                                    />
-                                  </div>
-                                ) : attachment.original_filename.endsWith('.zip') ? (
-                                  /* Display safe extraction and AV scan results if Zip */
-                                  <div style={{ padding: '16px', background: 'rgba(17,24,39,0.9)', borderRadius: '8px', border: '1px solid var(--border-glow)' }}>
-                                    <h5 style={{ fontSize: '13px', color: 'var(--neon-cyan)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                      <ShieldCheck size={15} /> AIRLOCK SECURITY SCAN RESULTS
-                                      {runtimeConfig?.uploads?.zip_password && ` (Zip password '${runtimeConfig.uploads.zip_password}')`}
-                                    </h5>
-                                    
-                                    <div style={{ fontSize: '12.5px', color: 'var(--neon-emerald)', marginBottom: '8px' }}>
-                                      [+] Status: <b>CLEAN (NO LIVE MALICIOUS THREAT DETECTED)</b>
-                                    </div>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                      Scanned memory-extracted log files:
-                                    </div>
-                                    <ul style={{ paddingLeft: '16px', fontSize: '12px', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', marginTop: '4px' }}>
-                                      <li>analysis_behavior.log</li>
-                                      <li>dump_pcap_wireshark.txt</li>
-                                      <li>check_anti_vm.asm</li>
-                                    </ul>
-                                  </div>
-                                ) : (
-                                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                                    {/* PREVIEW BUTTON FOR PDF, DOCX, OR IMAGES */}
-                                    {['pdf', 'docx'].includes(attachment.original_filename.split('.').pop().toLowerCase()) && (
-                                      <button 
-                                        type="button" 
-                                        onClick={() => handleOpenDocPreview(attachment)} 
-                                        className="btn btn-primary" 
-                                        style={{ padding: '7px 14px', fontSize: '12.5px', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold' }}
-                                      >
-                                        <Eye size={15} /> Preview ({attachment.original_filename.split('.').pop().toUpperCase()})
-                                      </button>
-                                    )}
+                            {fieldAttachments.length > 0 ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                {fieldAttachments.map((attachment, attIdx) => {
+                                  const ext = (attachment.original_filename || '').split('.').pop().toLowerCase();
+                                  const isCode = ['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log'].includes(ext);
 
-                                    {/* RAW DOWNLOAD BUTTON */}
-                                    <a 
-                                      href={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&download=true&token=${localStorage.getItem('malsec_token')}`} 
-                                      className="btn btn-secondary" 
-                                      style={{ padding: '7px 14px', fontSize: '12.5px', display: 'flex', alignItems: 'center', gap: '6px' }}
-                                      target="_blank" 
-                                      rel="noreferrer"
-                                    >
-                                      <Download size={14} /> Download File
-                                    </a>
-                                  </div>
-                                )}
+                                  return (
+                                    <div key={attIdx} style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                      <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                        <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                          {isCode ? <Code size={15} style={{ color: 'var(--neon-amber)' }} /> : <FileText size={15} style={{ color: 'var(--neon-cyan)' }} />}
+                                          File #{attIdx + 1}: <b style={{ color: 'var(--text-primary)' }}>{attachment.original_filename}</b>
+                                        </span>
+                                        {isCode && <span className="badge badge-submitted" style={{ fontSize: '10px' }}>CODE</span>}
+                                      </div>
+                                      
+                                      {/* Display inline if image */}
+                                      {ext in {png:1, jpg:1, jpeg:1} ? (
+                                        <div style={{ background: '#000', padding: '10px', borderRadius: '8px', display: 'inline-block', maxWidth: '100%' }}>
+                                          <img 
+                                            src={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${localStorage.getItem('malsec_token')}`} 
+                                            alt="Screenshot" 
+                                            style={{ maxWidth: '100%', maxHeight: '350px', borderRadius: '4px', border: '1px solid #374151', cursor: 'zoom-in' }} 
+                                            onClick={() => window.open(`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${localStorage.getItem('malsec_token')}`, '_blank')}
+                                          />
+                                        </div>
+                                      ) : ext === 'zip' ? (
+                                        /* Display safe extraction and AV scan results if Zip */
+                                        <div style={{ padding: '14px', background: 'rgba(17,24,39,0.9)', borderRadius: '8px', border: '1px solid var(--border-glow)' }}>
+                                          <h5 style={{ fontSize: '12.5px', color: 'var(--neon-cyan)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                            <ShieldCheck size={14} /> AIRLOCK SECURITY SCAN RESULTS
+                                            {runtimeConfig?.uploads?.zip_password && ` (Zip password '${runtimeConfig.uploads.zip_password}')`}
+                                          </h5>
+                                          <div style={{ fontSize: '12px', color: 'var(--neon-emerald)', marginBottom: '6px' }}>
+                                            [+] Status: <b>CLEAN (NO LIVE MALICIOUS THREAT DETECTED)</b>
+                                          </div>
+                                          <div style={{ marginTop: '8px' }}>
+                                            <a 
+                                              href={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&download=true&token=${localStorage.getItem('malsec_token')}`} 
+                                              className="btn btn-secondary" 
+                                              style={{ padding: '5px 10px', fontSize: '11.5px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                              target="_blank" 
+                                              rel="noreferrer"
+                                            >
+                                              <Download size={13} /> Download ZIP
+                                            </a>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                          {/* PREVIEW BUTTON FOR PDF, DOCX, OR CODE FILES */}
+                                          {['pdf', 'docx', ...['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log']].includes(ext) && (
+                                            <button 
+                                              type="button" 
+                                              onClick={() => handleOpenDocPreview(attachment)} 
+                                              className="btn btn-primary" 
+                                              style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px', fontWeight: 'bold' }}
+                                            >
+                                              <Eye size={14} /> {isCode ? 'Xem Code' : `Preview (${ext.toUpperCase()})`}
+                                            </button>
+                                          )}
+
+                                          {/* RAW DOWNLOAD BUTTON */}
+                                          <a 
+                                            href={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&download=true&token=${localStorage.getItem('malsec_token')}`} 
+                                            className="btn btn-secondary" 
+                                            style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                                            target="_blank" 
+                                            rel="noreferrer"
+                                          >
+                                            <Download size={13} /> Download File
+                                          </a>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
                               </div>
                             ) : (
                               <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>(No attachment uploaded for this field)</span>
@@ -3507,7 +5204,7 @@ export default function InstructorDashboard() {
                   </div>
 
                   <button type="submit" className="btn btn-primary" style={{ width: '100%', height: '46px', marginTop: '16px' }} disabled={actionLoading}>
-                    {actionLoading ? 'SAVING GRADE...' : 'SAVE AND NEXT STUDENT'}
+                    {actionLoading ? 'SAVING GRADE...' : 'SAVE GRADE'}
                   </button>
                 </form>
               </div>
@@ -3543,7 +5240,7 @@ export default function InstructorDashboard() {
                             sub.status === 'submitted' ? 'badge-submitted' : 
                             sub.status === 'graded' ? 'badge-graded' : 'badge-resubmit'
                           }`}>
-                            {sub.status === 'draft' ? 'Draft' :
+                            {sub.status === 'draft' ? (Object.keys(sub.answers || {}).length === 0 ? 'Not Submitted' : 'Draft') :
                              sub.status === 'submitted' ? 'Submitted' :
                              sub.status === 'graded' ? 'Graded' : 'Resubmit Requested'}
                           </span>
@@ -3571,7 +5268,6 @@ export default function InstructorDashboard() {
                             onClick={() => handleSelectGrading(sub, index)} 
                             className="btn btn-primary" 
                             style={{ padding: '6px 12px', fontSize: '12.5px' }}
-                            disabled={sub.status === 'draft'}
                           >
                             Speed Grader
                           </button>
@@ -3591,6 +5287,433 @@ export default function InstructorDashboard() {
         </div>
       )}
 
+      {/* VIEW 3: GRADE BY STUDENT (Chấm điểm theo từng sinh viên) */}
+      {viewState === 'student_grading' && studentGradingStudent && studentGradingClass && (
+        <div>
+          {/* Top Header & Navigation Bar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px', flexWrap: 'wrap' }}>
+            <button 
+              onClick={() => { 
+                setViewState('dashboard'); 
+                const targetCId = studentGradingClass?.id || selectedClass?.id;
+                setStudentGradingStudent(null); 
+                setStudentGradingLabs([]); 
+                setActiveSubmission(null); 
+                setSelectedLab(null); 
+                if (targetCId) {
+                  setSearchParams({ classId: targetCId, tab: 'students' })
+                } else {
+                  setSearchParams({})
+                }
+              }} 
+              className="btn btn-secondary" 
+              style={{ padding: '8px 14px', display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              <ArrowLeft size={16} /> Back to Class
+            </button>
+
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                <h2 style={{ fontSize: '20px', color: 'var(--text-primary)', margin: 0 }}>
+                  Student Grading: {studentGradingStudent.full_name}
+                </h2>
+                <span className="badge badge-submitted" style={{ fontSize: '11px', fontFamily: 'var(--font-mono)' }}>
+                  MSSV: {studentGradingStudent.username}
+                </span>
+                <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '11px', fontWeight: 'bold' }}>
+                  Class: {studentGradingClass.name} {studentGradingClass.semester ? `(${studentGradingClass.semester})` : ''}
+                </span>
+              </div>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '12.5px', margin: '4px 0 0 0' }}>
+                Select any lab assigned to this student below to review their findings, source code, screenshots, and grade them directly.
+              </p>
+            </div>
+
+            {/* Quick Student Switcher Bar */}
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', background: '#ffffff', padding: '6px 12px', borderRadius: '8px', border: '1px solid var(--border-color)', gap: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                <Users size={15} style={{ color: 'var(--neon-cyan)' }} />
+                <span style={{ fontSize: '12.5px', fontWeight: '600', color: 'var(--text-secondary)' }}>Switch Student:</span>
+                <select
+                  className="form-select"
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: '13px',
+                    margin: 0,
+                    minWidth: '220px',
+                    background: '#f8fafc',
+                    fontWeight: '500',
+                    cursor: 'pointer',
+                    border: '1px solid #cbd5e1'
+                  }}
+                  value={studentGradingStudent.id}
+                  onChange={(e) => {
+                    const nextStudentId = parseInt(e.target.value)
+                    const nextStudent = (studentGradingClass.users || []).find(u => u.id === nextStudentId)
+                    if (nextStudent) {
+                      openStudentGrading(studentGradingClass, nextStudent)
+                    }
+                  }}
+                >
+                  {(studentGradingClass.users || [])
+                    .filter(u => u.role === 'student')
+                    .map((st, idx) => (
+                      <option key={st.id} value={st.id}>
+                        {idx + 1}. {st.full_name} ({st.username})
+                      </option>
+                    ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {studentGradingLoading ? (
+            <div className="cyber-card" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+              <RefreshCw size={24} className="spin-slow" style={{ margin: '0 auto 12px auto', display: 'block', color: 'var(--neon-cyan)' }} />
+              Loading student's practical labs and submissions...
+            </div>
+          ) : studentGradingLabs.length === 0 ? (
+            <div className="cyber-card" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+              <BookOpen size={36} style={{ opacity: 0.3, margin: '0 auto 12px auto', display: 'block', color: 'var(--neon-cyan)' }} />
+              This class has no practical labs created yet.
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: '20px', alignItems: 'start' }}>
+              
+              {/* Left Column: List of All Labs for This Student */}
+              <div className="cyber-card" style={{ padding: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', borderBottom: '1px solid var(--border-color)', paddingBottom: '10px' }}>
+                  <h4 style={{ fontSize: '14px', margin: 0, fontWeight: '700', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <BookOpen size={16} style={{ color: 'var(--neon-cyan)' }} />
+                    Assigned Labs ({studentGradingLabs.length})
+                  </h4>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                    {studentGradingLabs.filter(p => p.submission?.status === 'graded').length} graded
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: 'calc(100vh - 260px)', overflowY: 'auto' }}>
+                  {studentGradingLabs.map((pair, pIdx) => {
+                    const { lab, submission: sub } = pair
+                    const isSelected = pIdx === studentGradingActiveLabIndex
+                    const subStatus = sub?.status || 'draft'
+                    const hasAnswers = Object.keys(sub?.answers || {}).length > 0 || (sub?.file_attachments || []).length > 0
+
+                    return (
+                      <div
+                        key={lab.id}
+                        onClick={() => handleSelectStudentGradingLab(pair, pIdx)}
+                        style={{
+                          padding: '12px',
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          background: isSelected ? 'rgba(242, 112, 36, 0.08)' : '#ffffff',
+                          border: isSelected ? '2px solid var(--neon-cyan)' : '1px solid #e2e8f0',
+                          transition: 'all 0.15s ease',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '6px'
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '6px' }}>
+                          <span style={{ fontWeight: isSelected ? '700' : '600', fontSize: '13px', color: isSelected ? 'var(--neon-cyan)' : 'var(--text-primary)', lineHeight: '1.3' }}>
+                            {pIdx + 1}. {lab.title}
+                          </span>
+                          {lab.grade_tag && (
+                            <span className="badge" style={{ fontSize: '9.5px', padding: '1px 5px', background: 'rgba(5, 150, 105, 0.1)', color: '#059669' }}>
+                              {lab.grade_tag}
+                            </span>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '2px' }}>
+                          <span className={`badge ${
+                            subStatus === 'graded' ? 'badge-graded' :
+                            subStatus === 'submitted' ? 'badge-submitted' :
+                            subStatus === 're_submit_requested' ? 'badge-resubmit' : 'badge-draft'
+                          }`} style={{ fontSize: '10.5px', padding: '1px 6px' }}>
+                            {subStatus === 'graded' ? `Graded: ${sub.score}/10` :
+                             subStatus === 'submitted' ? 'Submitted' :
+                             subStatus === 're_submit_requested' ? 'Resubmit' :
+                             hasAnswers ? 'Draft' : 'Not Started'}
+                          </span>
+
+                          {sub?.late_penalty > 0 && (
+                            <span style={{ fontSize: '10px', color: '#dc2626', fontWeight: '600' }}>
+                              Late -{sub.late_penalty}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Right Column: Speed Grader Workspace for the Selected Lab */}
+              <div>
+                {activeSubmission && selectedLab ? (
+                  <div className="split-container" style={{ margin: 0 }}>
+                    {/* Left Inner (65%): Student answers dynamically rendered */}
+                    <div className="split-left">
+                      <div className="cyber-card" style={{ flex: 1, overflowY: 'auto' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '14px', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <h3 style={{ fontSize: '18px', color: 'var(--neon-cyan)', margin: 0 }}>
+                                Lab: {selectedLab.title}
+                              </h3>
+                              <span className={`badge ${
+                                activeSubmission.status === 'draft' ? 'badge-draft' :
+                                activeSubmission.status === 'submitted' ? 'badge-submitted' :
+                                activeSubmission.status === 'graded' ? 'badge-graded' : 'badge-resubmit'
+                              }`} style={{ fontSize: '11.5px', padding: '2px 8px' }}>
+                                {activeSubmission.status === 'draft' ? (Object.keys(activeSubmission.answers || {}).length === 0 ? 'Not Submitted' : 'Draft') :
+                                 activeSubmission.status === 'submitted' ? 'Submitted' :
+                                 activeSubmission.status === 'graded' ? `Graded: ${activeSubmission.score}/10` : 'Resubmit Requested'}
+                              </span>
+                            </div>
+                            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', margin: '4px 0 0 0' }}>
+                              Student: {studentGradingStudent.full_name} ({studentGradingStudent.username}) | Submitted: {formatLocalTime(activeSubmission.submitted_at)}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Plagiarism details alert if detected */}
+                        {activeSubmission.is_plagiarized && (
+                          <div className="plag-alert-banner" style={{ marginBottom: '20px' }}>
+                            <ShieldAlert size={20} style={{ flexShrink: 0 }} />
+                            <div>
+                              <div style={{ fontWeight: 'bold' }}>
+                                [!] ACADEMIC INTEGRITY WARNING: Plagiarism Flagged ({activeSubmission.plagiarism_score}% similarity)
+                              </div>
+                              <div style={{ fontSize: '12.5px', marginTop: '4px' }}>
+                                Similar phrases matching other submissions found in the database.
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Question by question answers */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                          {(selectedLab.form_fields || []).map((field, fIdx) => {
+                            const ans = (activeSubmission.answers || {})[field.id]
+                            const fieldAttachments = (activeSubmission.file_attachments || []).filter(
+                              a => a.field_id === field.id
+                            )
+
+                            return (
+                              <div key={field.id} className="answer-item-card">
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                                  <span className="badge badge-draft" style={{ fontSize: '11px', padding: '2px 6px' }}>Q{fIdx + 1}</span>
+                                  <span style={{ fontWeight: '600', fontSize: '14.5px', color: 'var(--text-primary)' }}>{field.label}</span>
+                                </div>
+
+                                {/* TEXT FIELD */}
+                                {field.type === 'text' && (
+                                  <div className="answer-box-text">
+                                    {ans || <span style={{ color: 'var(--text-muted)' }}>(Empty)</span>}
+                                  </div>
+                                )}
+
+                                {/* SELECT FIELD */}
+                                {field.type === 'select' && (
+                                  <div className="answer-box-select">
+                                    {ans || <span style={{ color: 'var(--text-muted)' }}>(Empty)</span>}
+                                  </div>
+                                )}
+
+                                {/* CHECKBOX FIELD */}
+                                {field.type === 'checkbox' && (
+                                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '6px', padding: '4px 0' }}>
+                                    {ans ? ans.split(', ').map((item, idx) => (
+                                      <span key={idx} className="badge badge-submitted" style={{ fontSize: '12px', border: '1px solid var(--neon-cyan)', background: '#fff' }}>
+                                        {item}
+                                      </span>
+                                    )) : (
+                                      <span style={{ color: 'var(--text-muted)', fontSize: '14px' }}>(Empty)</span>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* TEXTAREA FIELD */}
+                                {field.type === 'textarea' && (
+                                  <div className="answer-box-textarea">
+                                    {parseMarkdown(ans)}
+                                  </div>
+                                )}
+
+                                {/* FILE ATTACHMENTS */}
+                                {field.type === 'file' && (
+                                  <div>
+                                    {fieldAttachments.length > 0 ? (
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                        {fieldAttachments.map((attachment, attIdx) => {
+                                          const ext = (attachment.original_filename || '').split('.').pop().toLowerCase();
+                                          const isCode = ['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log'].includes(ext);
+
+                                          return (
+                                            <div key={attIdx} style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                  {isCode ? <Code size={15} style={{ color: 'var(--neon-amber)' }} /> : <FileText size={15} style={{ color: 'var(--neon-cyan)' }} />}
+                                                  File #{attIdx + 1}: <b style={{ color: 'var(--text-primary)' }}>{attachment.original_filename}</b>
+                                                </span>
+                                                {isCode && <span className="badge badge-submitted" style={{ fontSize: '10px' }}>CODE</span>}
+                                              </div>
+                                              
+                                              {/* Display inline if image */}
+                                              {ext in {png:1, jpg:1, jpeg:1} ? (
+                                                <div style={{ background: '#000', padding: '10px', borderRadius: '8px', display: 'inline-block', maxWidth: '100%' }}>
+                                                  <img 
+                                                    src={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${localStorage.getItem('malsec_token')}`} 
+                                                    alt="Screenshot" 
+                                                    style={{ maxWidth: '100%', maxHeight: '350px', borderRadius: '4px', border: '1px solid #374151', cursor: 'zoom-in' }} 
+                                                    onClick={() => window.open(`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&token=${localStorage.getItem('malsec_token')}`, '_blank')}
+                                                  />
+                                                </div>
+                                              ) : ext === 'zip' ? (
+                                                <div style={{ padding: '14px', background: 'rgba(17,24,39,0.9)', borderRadius: '8px', border: '1px solid var(--border-glow)' }}>
+                                                  <h5 style={{ fontSize: '12.5px', color: 'var(--neon-cyan)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    <ShieldCheck size={14} /> AIRLOCK SECURITY SCAN RESULTS
+                                                    {runtimeConfig?.uploads?.zip_password && ` (Zip password '${runtimeConfig.uploads.zip_password}')`}
+                                                  </h5>
+                                                  <div style={{ fontSize: '12px', color: 'var(--neon-emerald)', marginBottom: '6px' }}>
+                                                    [+] Status: <b>CLEAN (NO LIVE MALICIOUS THREAT DETECTED)</b>
+                                                  </div>
+                                                  <div style={{ marginTop: '8px' }}>
+                                                    <a 
+                                                      href={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&download=true&token=${localStorage.getItem('malsec_token')}`} 
+                                                      className="btn btn-secondary" 
+                                                      style={{ padding: '5px 10px', fontSize: '11.5px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                                      target="_blank" 
+                                                      rel="noreferrer"
+                                                    >
+                                                      <Download size={13} /> Download ZIP
+                                                    </a>
+                                                  </div>
+                                                </div>
+                                              ) : (
+                                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                  {['pdf', 'docx', ...['c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'json', 'sql', 'sh', 'ps1', 'rs', 'go', 'txt', 'log']].includes(ext) && (
+                                                    <button 
+                                                      type="button" 
+                                                      onClick={() => handleOpenDocPreview(attachment)} 
+                                                      className="btn btn-primary" 
+                                                      style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px', fontWeight: 'bold' }}
+                                                    >
+                                                      <Eye size={14} /> {isCode ? 'Xem Code' : `Preview (${ext.toUpperCase()})`}
+                                                    </button>
+                                                  )}
+
+                                                  <a 
+                                                    href={`/api/submissions/file?path=${encodeURIComponent(attachment.filepath)}&download=true&token=${localStorage.getItem('malsec_token')}`} 
+                                                    className="btn btn-secondary" 
+                                                    style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                                                    target="_blank" 
+                                                    rel="noreferrer"
+                                                  >
+                                                    <Download size={13} /> Download File
+                                                  </a>
+                                                </div>
+                                              )}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : (
+                                      <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>(No attachment uploaded for this field)</span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Right Inner (35%): Score panel */}
+                    <div className="split-right">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                        <h3 style={{ fontSize: '18px', color: 'var(--text-primary)' }}>Score & Evaluation</h3>
+                      </div>
+
+                      <div className={`evaluation-status-box ${activeSubmission.late_penalty > 0 ? 'late' : ''}`}>
+                        <Clock size={16} style={{ color: activeSubmission.late_penalty > 0 ? 'var(--neon-ruby)' : 'var(--neon-emerald)', flexShrink: 0 }} />
+                        <div style={{ fontSize: '13px' }}>
+                          {activeSubmission.late_penalty > 0 ? (
+                            <span style={{ color: 'var(--neon-ruby)', fontWeight: '600' }}>
+                              Late submission! Penalty deducted: <b>{activeSubmission.late_penalty}%</b>.
+                            </span>
+                          ) : (
+                            <span style={{ color: '#15803d', fontWeight: '600' }}>
+                              On-time submission. No penalty applied.
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <form onSubmit={handleSaveGrade} style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                        <div className="form-group">
+                          <label className="form-label">Practical Lab Score (Scale of 10.0)</label>
+                          <input 
+                            type="number" 
+                            className="form-input" 
+                            required 
+                            step="0.1" 
+                            min="0" 
+                            max="10"
+                            value={score}
+                            onChange={(e) => setScore(e.target.value)}
+                          />
+                          <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                            {activeSubmission.late_penalty > 0 && score && (
+                              <span>Final score after late penalty deduction: <b>{(parseFloat(score) * (1 - activeSubmission.late_penalty / 100)).toFixed(2)}</b> / 10</span>
+                            )}
+                          </p>
+                        </div>
+
+                        <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '20px' }}>
+                          <input 
+                            type="checkbox" 
+                            id="studentReqResubmitCheck"
+                            checked={requestResubmit}
+                            onChange={(e) => setRequestResubmit(e.target.checked)}
+                          />
+                          <label htmlFor="studentReqResubmitCheck" style={{ fontSize: '13.5px', color: 'var(--neon-ruby)', cursor: 'pointer', fontWeight: '500' }}>
+                            Request student to resubmit (Re-submit)
+                          </label>
+                        </div>
+
+                        <div className="form-group" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                          <label className="form-label">Instructor Detailed Feedback</label>
+                          <textarea 
+                            className="form-input form-textarea" 
+                            placeholder="Enter feedback for student..."
+                            style={{ flex: 1, minHeight: '150px' }}
+                            value={comment}
+                            onChange={(e) => setComment(e.target.value)}
+                          />
+                        </div>
+
+                        <button type="submit" className="btn btn-primary" style={{ width: '100%', height: '46px', marginTop: '16px' }} disabled={actionLoading}>
+                          {actionLoading ? 'SAVING GRADE...' : 'SAVE GRADE'}
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="cyber-card" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                    Please select a lab from the left sidebar to start grading.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* MODAL DYNAMIC FORM BUILDER */}
       {showLabModal && (
         <div className="modal-overlay">
@@ -3602,6 +5725,12 @@ export default function InstructorDashboard() {
             <form onSubmit={handleSaveLab}>
 
               <div className="modal-body">
+                {modalError && (
+                  <div className="plag-alert-banner" style={{ marginBottom: '16px' }}>
+                    <ShieldAlert size={18} />
+                    <span>{modalError}</span>
+                  </div>
+                )}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                   <div className="form-group">
                     <label className="form-label">Lab Title</label>
@@ -3642,6 +5771,156 @@ export default function InstructorDashboard() {
                   />
                 </div>
 
+                {/* Lab Attachment Files */}
+                <div className="form-group" style={{ background: 'rgba(242, 112, 36, 0.03)', border: '1px dashed rgba(242, 112, 36, 0.3)', borderRadius: '8px', padding: '14px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <label className="form-label" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--neon-cyan)', fontWeight: '600' }}>
+                      <Paperclip size={15} /> Lab Reference Materials & Attachment Files (Optional)
+                    </label>
+                    <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Students will view and download these when opening the lab</span>
+                  </div>
+
+                  {/* Current attachments list */}
+                  {labAttachments.length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
+                      {labAttachments.map((fileItem, idx) => (
+                        <div 
+                          key={idx}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '8px 12px',
+                            background: '#ffffff',
+                            borderRadius: '6px',
+                            border: '1px solid var(--border-color)',
+                            fontSize: '12.5px'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
+                            <FileText size={15} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
+                            <span style={{ fontWeight: '500', color: 'var(--text-primary)', wordBreak: 'break-all' }}>
+                              {fileItem.original_filename || fileItem.filename}
+                            </span>
+                            {fileItem.size_bytes && (
+                              <span style={{ fontSize: '11px', color: 'var(--text-muted)', flexShrink: 0 }}>
+                                ({(fileItem.size_bytes / 1024).toFixed(1)} KB)
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                            {/* Visibility Badge */}
+                            {fileItem.visibility_mode === 'specific' ? (
+                              <span 
+                                className="badge" 
+                                style={{ 
+                                  background: 'rgba(242, 112, 36, 0.1)', 
+                                  color: 'var(--neon-amber)', 
+                                  border: '1px solid rgba(242, 112, 36, 0.3)',
+                                  fontSize: '11px',
+                                  padding: '2px 6px'
+                                }}
+                              >
+                                👤 {(fileItem.allowed_students || []).length} Students
+                              </span>
+                            ) : (
+                              <span 
+                                className="badge" 
+                                style={{ 
+                                  background: 'rgba(16, 185, 129, 0.1)', 
+                                  color: 'var(--neon-emerald)', 
+                                  border: '1px solid rgba(16, 185, 129, 0.3)',
+                                  fontSize: '11px',
+                                  padding: '2px 6px'
+                                }}
+                              >
+                                👥 Whole Class
+                              </span>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveAttachmentIdx(idx)
+                                setPermSearchTerm('')
+                                setShowAttachmentPermModal(true)
+                              }}
+                              className="btn btn-secondary"
+                              style={{ padding: '3px 8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                              title="Configure student access permissions for this file"
+                            >
+                              <Users size={12} /> Permissions
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleOpenDocPreview({ filepath: fileItem.filepath, original_filename: fileItem.original_filename || fileItem.filename })}
+                              className="btn btn-secondary"
+                              style={{ padding: '3px 8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                              title="Preview document"
+                            >
+                              <Eye size={12} /> View
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveLabAttachment(idx)}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--neon-ruby)',
+                                cursor: 'pointer',
+                                padding: '4px',
+                                display: 'flex',
+                                alignItems: 'center'
+                              }}
+                              title="Remove this attachment"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* File upload input zone */}
+                  <div>
+                    <input 
+                      type="file"
+                      id="labAttachmentInput"
+                      multiple
+                      style={{ display: 'none' }}
+                      onChange={handleLabAttachmentUpload}
+                      disabled={uploadingLabAttachment}
+                    />
+                    <label 
+                      htmlFor="labAttachmentInput" 
+                      style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center', 
+                        gap: '8px', 
+                        padding: '10px 16px', 
+                        background: '#ffffff', 
+                        border: '1px solid var(--border-color)', 
+                        borderRadius: '6px', 
+                        cursor: uploadingLabAttachment ? 'not-allowed' : 'pointer',
+                        fontSize: '12.5px',
+                        color: 'var(--text-primary)',
+                        fontWeight: '500',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      <Upload size={14} style={{ color: 'var(--neon-cyan)' }} />
+                      {uploadingLabAttachment 
+                        ? 'Scanning for security & uploading...' 
+                        : labAttachments.length > 0 
+                          ? '+ Attach additional reference file (Word, PDF, ZIP, Code, Image)...' 
+                          : 'Attach files for Lab assignment (supports multiple files: Word, PDF, malware samples in ZIP, Code, Images)...'}
+                    </label>
+                  </div>
+                </div>
+
                 <div className="form-group">
                   <label className="form-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <span>Grade Category Tag</span>
@@ -3661,7 +5940,7 @@ export default function InstructorDashboard() {
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                   <div className="form-group">
-                    <label className="form-label">Deadline (Giờ VN GMT+7)</label>
+                    <label className="form-label">Deadline (Local Time GMT+7)</label>
                     <input 
                       type="datetime-local" 
                       className="form-input" 
@@ -3687,7 +5966,18 @@ export default function InstructorDashboard() {
                         type="checkbox" 
                         id="enableVmCheck" 
                         checked={enableVm}
-                        onChange={(e) => setEnableVm(e.target.checked)}
+                        onChange={(e) => {
+                          const checked = e.target.checked
+                          setEnableVm(checked)
+                          if (checked) {
+                            const defaultProto = runtimeConfig?.vm?.default_protocol || 'rdp'
+                            if (!vmProtocol) setVmProtocol(defaultProto)
+                            if (!vmPort) setVmPort(runtimeConfig?.vm?.protocol_ports?.[defaultProto] || 3389)
+                            if (!templateVmid) {
+                              setTemplateVmid(runtimeConfig?.vm?.default_template_vmid || (pveTemplates[0]?.vmid ? String(pveTemplates[0].vmid) : ''))
+                            }
+                          }
+                        }}
                       />
                       <label htmlFor="enableVmCheck" style={{ fontSize: '13.5px', cursor: 'pointer', color: 'var(--neon-cyan)', fontWeight: '500' }}>Enable Virtual Machine (VM)</label>
                     </div>
@@ -3803,6 +6093,267 @@ export default function InstructorDashboard() {
                         />
                       </div>
                     </div>
+                    {/* VM SHARED DRIVE D: CONTENT CONFIGURATION */}
+                    <div style={{ marginTop: '16px', padding: '14px', background: '#ffffff', borderRadius: '8px', border: '1px solid var(--border-color)', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                      <label className="form-label" style={{ color: 'var(--text-primary)', fontSize: '13px', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold' }}>
+                        <HardDrive size={15} style={{ color: 'var(--neon-cyan)' }} />
+                        VM Shared Drive (Drive D:\) Content
+                      </label>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', lineHeight: '1.4' }}>
+                        Choose whether this lab uses the platform default tools drive (<code>tools-1001.iso</code>) or a custom set of files isolated specifically for this lab.
+                      </p>
+
+                      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: vmDriveMode === 'default' ? 'var(--neon-cyan)' : 'var(--text-secondary)', fontSize: '13px', fontWeight: vmDriveMode === 'default' ? '600' : 'normal' }}>
+                          <input
+                            type="radio"
+                            name="vmDriveModeRadio"
+                            checked={vmDriveMode === 'default'}
+                            onChange={() => setVmDriveMode('default')}
+                            style={{ accentColor: 'var(--neon-cyan)' }}
+                          />
+                          <span><b>Default Tools Drive</b> (All tools in <code>tools-1001.iso</code>)</span>
+                        </label>
+
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: vmDriveMode === 'custom' ? 'var(--neon-amber)' : 'var(--text-secondary)', fontSize: '13px', fontWeight: vmDriveMode === 'custom' ? '600' : 'normal' }}>
+                          <input
+                            type="radio"
+                            name="vmDriveModeRadio"
+                            checked={vmDriveMode === 'custom'}
+                            onChange={() => setVmDriveMode('custom')}
+                            style={{ accentColor: 'var(--neon-amber)' }}
+                          />
+                          <span><b>Custom Drive for this Lab</b> (Designated files only)</span>
+                        </label>
+                      </div>
+
+                      {vmDriveMode === 'custom' && (
+                        <div style={{ padding: '12px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                            <span style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                              Select files to mount on Drive D:\ ({vmDriveFiles.length} selected):
+                            </span>
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                              <button
+                                type="button"
+                                onClick={() => setVmDriveFiles(availableVmTools.map(t => t.filename))}
+                                className="btn btn-secondary"
+                                style={{ padding: '2px 8px', fontSize: '11px' }}
+                              >
+                                Select All
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setVmDriveFiles([])}
+                                className="btn btn-secondary"
+                                style={{ padding: '2px 8px', fontSize: '11px' }}
+                              >
+                                Clear All
+                              </button>
+                            </div>
+                          </div>
+
+                          {loadingVmTools ? (
+                            <div style={{ padding: '12px', textAlign: 'center', fontSize: '12px', color: 'var(--text-muted)' }}>
+                              Loading available tools from Proxmox...
+                            </div>
+                          ) : availableVmTools.length === 0 ? (
+                            <div style={{ padding: '12px', textAlign: 'center', fontSize: '12px', color: 'var(--text-muted)' }}>
+                              No files found in tools repository. Admin can upload tools in Admin &rarr; VM Shared Tools.
+                            </div>
+                          ) : (
+                            <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                              {availableVmTools.map(tool => {
+                                const toolKey = tool.rel_path || tool.filename
+                                const isChecked = vmDriveFiles.includes(toolKey) || vmDriveFiles.includes(tool.filename)
+                                const sizeMb = (tool.size_bytes / (1024 * 1024)).toFixed(2)
+                                const isPrivate = tool.scope && tool.scope.startsWith('lecturer_')
+                                const lecturerOwner = isPrivate ? tool.scope.replace('lecturer_', '') : null
+
+                                return (
+                                  <label
+                                    key={toolKey}
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      padding: '7px 10px',
+                                      borderRadius: '6px',
+                                      background: isChecked ? 'rgba(0, 242, 254, 0.06)' : '#ffffff',
+                                      border: isChecked ? '1px solid rgba(0, 242, 254, 0.4)' : '1px solid #e2e8f0',
+                                      cursor: 'pointer',
+                                      fontSize: '12.5px',
+                                      transition: 'all 0.15s ease'
+                                    }}
+                                  >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={(e) => {
+                                          if (e.target.checked) {
+                                            setVmDriveFiles([...vmDriveFiles.filter(f => f !== tool.filename && f !== toolKey), toolKey])
+                                          } else {
+                                            setVmDriveFiles(vmDriveFiles.filter(f => f !== toolKey && f !== tool.filename))
+                                          }
+                                        }}
+                                      />
+                                      <span style={{ fontFamily: 'var(--font-mono)', fontWeight: '500', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        {tool.filename}
+                                      </span>
+                                      {isPrivate ? (
+                                        <span className="badge" style={{ background: '#fef3c7', color: '#92400e', fontSize: '10px', padding: '1px 6px', fontWeight: 'bold' }}>
+                                          🔒 @{lecturerOwner}
+                                        </span>
+                                      ) : (
+                                        <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '10px', padding: '1px 6px' }}>
+                                          🌐 Common
+                                        </span>
+                                      )}
+                                    </div>
+                                    <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginLeft: '8px', flexShrink: 0 }}>
+                                      {tool.size_bytes > 1024 * 1024 ? `${sizeMb} MB` : `${(tool.size_bytes / 1024).toFixed(1)} KB`}
+                                    </span>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          )}
+                          <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '8px', marginBottom: 0 }}>
+                            💡 A custom ISO will be compiled automatically and mounted exclusively to student VMs taking this lab.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Hardware Specifications */}
+                    <div style={{ marginTop: '14px', marginBottom: '14px', padding: '14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                      <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        ⚡ VM Hardware Allocation (Custom Specifications)
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label className="form-label" style={{ fontSize: '12px' }}>CPU Cores (vCPU)</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="32"
+                            className="form-input"
+                            placeholder="Template default (e.g. 2, 4)"
+                            value={cpuCores}
+                            onChange={(e) => setCpuCores(e.target.value)}
+                            style={{ fontSize: '13px' }}
+                          />
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Leave blank to inherit cores from base template VM</span>
+                        </div>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label className="form-label" style={{ fontSize: '12px' }}>RAM (GB)</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="128"
+                            step="1"
+                            className="form-input"
+                            placeholder="Template default (e.g. 4, 8, 16)"
+                            value={ramGb}
+                            onChange={(e) => setRamGb(e.target.value)}
+                            style={{ fontSize: '13px' }}
+                          />
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Leave blank to inherit RAM from base template VM</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Exam / Test Mode Switch */}
+                    <div style={{ 
+                      marginTop: '14px', 
+                      marginBottom: '14px', 
+                      padding: '16px', 
+                      background: isExamMode ? 'rgba(236, 72, 153, 0.05)' : '#ffffff', 
+                      borderRadius: '8px', 
+                      border: isExamMode ? '1.5px solid #ec4899' : '1px solid var(--border-color)', 
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
+                      transition: 'all 0.2s ease'
+                    }}>
+                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          id="isExamModeCheck"
+                          checked={isExamMode}
+                          onChange={(e) => {
+                            const checked = e.target.checked
+                            setIsExamMode(checked)
+                            if (checked) {
+                              setDisableVmCopy(true)
+                              setDisableVmPaste(true)
+                            }
+                          }}
+                          style={{ marginTop: '3px', accentColor: '#ec4899', width: '16px', height: '16px' }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontSize: '14px', fontWeight: '700', color: isExamMode ? '#be185d' : 'var(--text-primary)' }}>
+                              🎓 Exam / Test Mode (Anti-Cheating Sandbox & In-VM Word Submission)
+                            </span>
+                            {isExamMode && (
+                              <span className="badge" style={{ background: '#fdf2f8', color: '#db2777', border: '1px solid #fbcfe8', fontSize: '11px', fontWeight: '600' }}>
+                                EXAM ACTIVE
+                              </span>
+                            )}
+                          </div>
+                          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '4px 0 0 0', lineHeight: '1.45' }}>
+                            When enabled: Students perform analysis and author their Word report (<b>.docx</b>) completely inside the VM. Automatically enforces <b>two-way clipboard isolation</b> (blocks copy from VM to host, and blocks paste from host to VM). Students can <b>Rollback clean VMs anytime without losing their report or analysis files</b> in the Exam_Workspace folder, and submit their final Word report directly from the VM for instructor speed grading.
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {/* Clipboard Isolation Options */}
+                    <div style={{ marginTop: '14px', marginBottom: '14px', padding: '14px', background: '#ffffff', borderRadius: '8px', border: '1px solid var(--border-color)', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                      <div style={{ fontSize: '12.5px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '8px' }}>
+                        🔒 Clipboard Isolation Policy
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: isExamMode ? 'not-allowed' : 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            id="disableVmCopyCheck"
+                            checked={isExamMode || disableVmCopy}
+                            disabled={isExamMode}
+                            onChange={(e) => setDisableVmCopy(e.target.checked)}
+                            style={{ marginTop: '3px', accentColor: 'var(--neon-ruby)' }}
+                          />
+                          <div>
+                            <span style={{ fontSize: '13px', fontWeight: '600', color: (isExamMode || disableVmCopy) ? '#dc2626' : 'var(--text-primary)' }}>
+                              Block Copy from VM to Host (VM &rarr; Physical Host)
+                            </span>
+                            <p style={{ fontSize: '11.5px', color: 'var(--text-secondary)', margin: '2px 0 0 0', lineHeight: '1.35' }}>
+                              Prevents students from copying text, code, or malware artifacts out of the VM to their physical computer. Internal VM copy/paste remains functional.
+                            </p>
+                          </div>
+                        </label>
+
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: isExamMode ? 'not-allowed' : 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            id="disableVmPasteCheck"
+                            checked={isExamMode || disableVmPaste}
+                            disabled={isExamMode}
+                            onChange={(e) => setDisableVmPaste(e.target.checked)}
+                            style={{ marginTop: '3px', accentColor: 'var(--neon-ruby)' }}
+                          />
+                          <div>
+                            <span style={{ fontSize: '13px', fontWeight: '600', color: (isExamMode || disableVmPaste) ? '#dc2626' : 'var(--text-primary)' }}>
+                              Block Paste from Host to VM (Physical Host &rarr; VM)
+                            </span>
+                            <p style={{ fontSize: '11.5px', color: 'var(--text-secondary)', margin: '2px 0 0 0', lineHeight: '1.35' }}>
+                              Prevents students from pasting external solutions, code, or pre-made reports into the VM from outside.
+                            </p>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
                     {runtimeConfig?.vm && (
                       <p style={{ fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '8px', marginBottom: 0 }}>
                         📌 Template VMs are in VMID range <b>{runtimeConfig.vm.template_vmid_min} – {runtimeConfig.vm.template_vmid_max}</b>. Student VMs are in range <b>{runtimeConfig.vm.student_vmid_min} – {runtimeConfig.vm.student_vmid_max}</b>.
@@ -3917,12 +6468,48 @@ export default function InstructorDashboard() {
                   </div>
                 </div>
               </div>
-              <div className="modal-footer">
-                <button type="button" onClick={() => setShowLabModal(false)} className="btn btn-secondary">CLOSE</button>
-                <button type="submit" className="btn btn-primary" disabled={actionLoading}>
-                  {actionLoading ? 'SAVING...' : editingLab ? 'SAVE CHANGES' : 'CONFIGURE & PUBLISH LAB'}
-                </button>
-
+              <div className="modal-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  {editingLab && (
+                    <button 
+                      type="button" 
+                      onClick={() => {
+                        const tempLabObj = {
+                          ...editingLab,
+                          title: labTitle,
+                          description: labDesc,
+                          class_id: parseInt(classId),
+                          deadline: deadline,
+                          late_policy: {
+                            allow_late: allowLate,
+                            penalty_per_hour_percent: parseFloat(penaltyPerHour) || 0,
+                            max_penalty_percent: parseFloat(maxPenalty) || 0
+                          },
+                          form_schema: formFields,
+                          attachments: labAttachments,
+                          enable_vm: enableVm,
+                          template_vmid: templateVmid ? parseInt(templateVmid) : null,
+                          is_linked_clone: isLinkedClone,
+                          vm_protocol: vmProtocol,
+                          vm_port: vmPort ? parseInt(vmPort) : null,
+                          disable_vm_copy: disableVmCopy
+                        }
+                        openLabPreview(tempLabObj)
+                      }} 
+                      className="btn btn-secondary" 
+                      style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#16a34a', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                      title="Preview this lab and test VM environment"
+                    >
+                      <Eye size={15} /> Preview Lab
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button type="button" onClick={() => setShowLabModal(false)} className="btn btn-secondary">CLOSE</button>
+                  <button type="submit" className="btn btn-primary" disabled={actionLoading}>
+                    {actionLoading ? 'SAVING...' : editingLab ? 'SAVE CHANGES' : 'CONFIGURE & PUBLISH LAB'}
+                  </button>
+                </div>
               </div>
             </form>
           </div>
@@ -3939,6 +6526,12 @@ export default function InstructorDashboard() {
             </div>
             <form onSubmit={handleSaveExtension}>
               <div className="modal-body">
+                {modalError && (
+                  <div className="plag-alert-banner" style={{ marginBottom: '16px' }}>
+                    <ShieldAlert size={18} />
+                    <span>{modalError}</span>
+                  </div>
+                )}
                 <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
                   This setting allows the selected student to have an individual submission deadline (Special Extension) without affecting the overall class schedule.
                 </p>
@@ -3959,7 +6552,7 @@ export default function InstructorDashboard() {
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">New Extended Deadline (Giờ VN GMT+7)</label>
+                  <label className="form-label">New Extended Deadline (Local Time GMT+7)</label>
                   <input 
                     type="datetime-local" 
                     className="form-input" 
@@ -3990,6 +6583,12 @@ export default function InstructorDashboard() {
             </div>
             <form onSubmit={handleSaveStudentEdit}>
               <div className="modal-body">
+                {modalError && (
+                  <div className="plag-alert-banner" style={{ marginBottom: '16px' }}>
+                    <ShieldAlert size={18} />
+                    <span>{modalError}</span>
+                  </div>
+                )}
                 <div className="form-group">
                   <label className="form-label">Username (Student ID) - Fixed</label>
                   <input 
@@ -4071,6 +6670,12 @@ export default function InstructorDashboard() {
               <button onClick={() => setShowVmManagerModal(false)} className="btn btn-secondary" style={{ padding: '4px 8px' }}>X</button>
             </div>
             <div className="modal-body">
+              {modalError && (
+                <div className="plag-alert-banner" style={{ marginBottom: '16px' }}>
+                  <ShieldAlert size={18} />
+                  <span>{modalError}</span>
+                </div>
+              )}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
                 <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0 }}>
                   List of Proxmox VE virtual machines allocated to students for this lab.
@@ -4209,13 +6814,54 @@ export default function InstructorDashboard() {
             
             <form onSubmit={handleCloneLabSubmit}>
               <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div style={{ padding: '12px', background: '#ecfdf5', borderRadius: '6px', border: '1px solid #a7f3d0', fontSize: '13px' }}>
+                {modalError && (
+                  <div className="plag-alert-banner" style={{ margin: 0 }}>
+                    <ShieldAlert size={18} />
+                    <span>{modalError}</span>
+                  </div>
+                )}
+                <div style={{ padding: '12px 14px', background: '#ecfdf5', borderRadius: '8px', border: '1px solid #a7f3d0', fontSize: '13px' }}>
                   <div style={{ color: 'var(--text-secondary)', marginBottom: '4px', fontSize: '12px' }}>Source Lab:</div>
                   <div style={{ fontWeight: 'bold', color: 'var(--text-primary)', fontSize: '15px' }}>{cloneSourceLab.title}</div>
-                  <div style={{ fontSize: '12px', color: '#047857', marginTop: '4px', fontWeight: '500' }}>
+                  
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
                     {cloneSourceLab.enable_vm ? (
-                      `🖥️ VM Template ${cloneSourceLab.template_vmid} (${cloneSourceLab.is_linked_clone ? 'Linked Clone' : 'Full Clone'}) | ${cloneSourceLab.vm_protocol?.toUpperCase()}`
-                    ) : 'No virtual machine'}
+                      <span className="badge" style={{ background: '#d1fae5', color: '#065f46', fontSize: '11px', fontWeight: '600' }}>
+                        🖥️ VM {cloneSourceLab.template_vmid} ({cloneSourceLab.is_linked_clone ? 'Linked' : 'Full'}) | {cloneSourceLab.vm_protocol?.toUpperCase()}
+                      </span>
+                    ) : (
+                      <span className="badge" style={{ background: '#f1f5f9', color: '#64748b', fontSize: '11px' }}>
+                        No VM
+                      </span>
+                    )}
+
+                    {cloneSourceLab.vm_drive_mode === 'custom' ? (
+                      <span className="badge" style={{ background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', fontSize: '11px', fontWeight: '600' }}>
+                        💿 Custom Drive D: ({cloneSourceLab.vm_drive_files?.length || 0} files)
+                      </span>
+                    ) : (
+                      <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '11px' }}>
+                        💿 Default Tools Drive D:
+                      </span>
+                    )}
+
+                    {cloneSourceLab.is_exam_mode && (
+                      <span className="badge" style={{ background: '#fdf2f8', color: '#db2777', border: '1px solid #fbcfe8', fontSize: '11px', fontWeight: '700' }}>
+                        🎓 Exam Mode
+                      </span>
+                    )}
+
+                    {(cloneSourceLab.cpu_cores || cloneSourceLab.ram_mb) && (
+                      <span className="badge" style={{ background: '#f3e8ff', color: '#6b21a8', fontSize: '11px' }}>
+                        ⚡ {cloneSourceLab.cpu_cores ? `${cloneSourceLab.cpu_cores} vCPU` : ''}{cloneSourceLab.cpu_cores && cloneSourceLab.ram_mb ? ' / ' : ''}{cloneSourceLab.ram_mb ? `${Math.round(cloneSourceLab.ram_mb / 1024)}GB RAM` : ''}
+                      </span>
+                    )}
+
+                    {cloneSourceLab.grade_tag && (
+                      <span className="badge" style={{ background: 'rgba(5, 150, 105, 0.1)', color: '#059669', fontSize: '11px' }}>
+                        🏷️ {cloneSourceLab.grade_tag}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -4383,6 +7029,49 @@ export default function InstructorDashboard() {
                   }} 
                 />
               )}
+
+              {/* CODE / TEXT Preview: Monospace formatted code viewer with line numbers */}
+              {previewDoc.type === 'code' && !previewError && !previewLoading && (
+                <div style={{ padding: '24px', maxWidth: '1000px', width: '100%', margin: '0 auto' }}>
+                  <div style={{ 
+                    background: '#090d16', 
+                    borderRadius: '8px', 
+                    border: '1px solid rgba(0, 242, 254, 0.2)', 
+                    overflow: 'hidden',
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.5)'
+                  }}>
+                    <div style={{ 
+                      padding: '10px 16px', 
+                      background: 'rgba(255,255,255,0.04)', 
+                      borderBottom: '1px solid rgba(255,255,255,0.08)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}>
+                      <span style={{ fontSize: '12.5px', fontFamily: 'var(--font-mono)', color: 'var(--neon-cyan)', fontWeight: '600' }}>
+                        {previewDoc.filename}
+                      </span>
+                      <span className="badge badge-submitted" style={{ fontSize: '10px', padding: '2px 6px' }}>
+                        SOURCE CODE
+                      </span>
+                    </div>
+                    <pre style={{ 
+                      margin: 0, 
+                      padding: '16px 20px', 
+                      fontFamily: 'var(--font-mono)', 
+                      fontSize: '13px', 
+                      lineHeight: '1.6', 
+                      color: '#e2e8f0', 
+                      whiteSpace: 'pre-wrap', 
+                      wordBreak: 'break-all',
+                      overflowX: 'auto',
+                      maxHeight: '65vh'
+                    }}>
+                      <code>{previewDoc.content}</code>
+                    </pre>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -4402,6 +7091,12 @@ export default function InstructorDashboard() {
             
             <form onSubmit={handleSaveClassSettings}>
               <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {modalError && (
+                  <div className="plag-alert-banner" style={{ margin: 0 }}>
+                    <ShieldAlert size={18} />
+                    <span>{modalError}</span>
+                  </div>
+                )}
                 <div style={{ padding: '10px 14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
                   <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Managing Class:</span>
                   <div style={{ fontSize: '15px', fontWeight: 'bold', color: 'var(--neon-cyan)' }}>{selectedClass.name}</div>
@@ -4409,7 +7104,7 @@ export default function InstructorDashboard() {
 
                 <div className="form-group" style={{ margin: 0 }}>
                   <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span>Academic Semester (Kỳ học)</span>
+                    <span>Academic Semester</span>
                     <span style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>Default: "unknown"</span>
                   </label>
                   <select 
@@ -4452,7 +7147,571 @@ export default function InstructorDashboard() {
           </div>
         </div>
       )}
+      {/* MODAL: PHÂN QUYỀN HIỂN THỊ TÀI LIỆU ĐÍNH KÈM CHO TỪNG SINH VIÊN */}
+      {showAttachmentPermModal && activeAttachmentIdx !== null && labAttachments[activeAttachmentIdx] && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '540px' }}>
+            <div className="modal-header">
+              <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Users size={18} style={{ color: 'var(--neon-cyan)' }} />
+                Document Visibility & Permissions
+              </h3>
+              <button onClick={() => setShowAttachmentPermModal(false)} className="close-btn">&times;</button>
+            </div>
+
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* File Info Card */}
+              <div style={{ padding: '12px 14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                <span style={{ fontSize: '11.5px', color: 'var(--text-secondary)' }}>Attached File:</span>
+                <div style={{ fontSize: '14px', fontWeight: 'bold', color: 'var(--text-primary)', wordBreak: 'break-all', marginTop: '2px' }}>
+                  {labAttachments[activeAttachmentIdx].original_filename || labAttachments[activeAttachmentIdx].filename}
+                </div>
+              </div>
+
+              {/* Mode Selection */}
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label" style={{ fontWeight: '600', marginBottom: '8px', display: 'block' }}>
+                  Who can view and download this file?
+                </label>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <label style={{ 
+                    flex: 1, 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: '8px', 
+                    padding: '10px 14px', 
+                    background: (labAttachments[activeAttachmentIdx].visibility_mode || 'all') === 'all' ? 'rgba(0, 242, 254, 0.08)' : '#ffffff',
+                    border: (labAttachments[activeAttachmentIdx].visibility_mode || 'all') === 'all' ? '1px solid var(--neon-cyan)' : '1px solid var(--border-color)',
+                    borderRadius: '8px',
+                    cursor: 'pointer'
+                  }}>
+                    <input 
+                      type="radio" 
+                      name="visMode"
+                      checked={(labAttachments[activeAttachmentIdx].visibility_mode || 'all') === 'all'}
+                      onChange={() => {
+                        const updated = [...labAttachments]
+                        updated[activeAttachmentIdx] = {
+                          ...updated[activeAttachmentIdx],
+                          visibility_mode: 'all'
+                        }
+                        setLabAttachments(updated)
+                      }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>👥 Whole Class</div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>All enrolled students</div>
+                    </div>
+                  </label>
+
+                  <label style={{ 
+                    flex: 1, 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: '8px', 
+                    padding: '10px 14px', 
+                    background: labAttachments[activeAttachmentIdx].visibility_mode === 'specific' ? 'rgba(242, 112, 36, 0.08)' : '#ffffff',
+                    border: labAttachments[activeAttachmentIdx].visibility_mode === 'specific' ? '1px solid var(--neon-amber)' : '1px solid var(--border-color)',
+                    borderRadius: '8px',
+                    cursor: 'pointer'
+                  }}>
+                    <input 
+                      type="radio" 
+                      name="visMode"
+                      checked={labAttachments[activeAttachmentIdx].visibility_mode === 'specific'}
+                      onChange={() => {
+                        const updated = [...labAttachments]
+                        updated[activeAttachmentIdx] = {
+                          ...updated[activeAttachmentIdx],
+                          visibility_mode: 'specific',
+                          allowed_students: updated[activeAttachmentIdx].allowed_students || []
+                        }
+                        setLabAttachments(updated)
+                      }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>👤 Specific Students</div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Designated students only</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Student Selector when specific */}
+              {labAttachments[activeAttachmentIdx].visibility_mode === 'specific' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '4px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '12.5px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                      Select Permitted Students ({((labAttachments[activeAttachmentIdx].allowed_students || []).length)} selected):
+                    </span>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const currentClass = classes.find(c => c.id === parseInt(classId))
+                          const allUsernames = (currentClass?.users || []).filter(u => u.role === 'student').map(u => u.username)
+                          const updated = [...labAttachments]
+                          updated[activeAttachmentIdx] = {
+                            ...updated[activeAttachmentIdx],
+                            allowed_students: allUsernames
+                          }
+                          setLabAttachments(updated)
+                        }}
+                        className="btn btn-secondary"
+                        style={{ padding: '2px 8px', fontSize: '11px' }}
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updated = [...labAttachments]
+                          updated[activeAttachmentIdx] = {
+                            ...updated[activeAttachmentIdx],
+                            allowed_students: []
+                          }
+                          setLabAttachments(updated)
+                        }}
+                        className="btn btn-secondary"
+                        style={{ padding: '2px 8px', fontSize: '11px' }}
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Search box */}
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Search by student ID or name..."
+                    value={permSearchTerm}
+                    onChange={(e) => setPermSearchTerm(e.target.value)}
+                    style={{ padding: '6px 12px', fontSize: '12px' }}
+                  />
+
+                  {/* Students checklist */}
+                  <div style={{ 
+                    maxHeight: '220px', 
+                    overflowY: 'auto', 
+                    border: '1px solid var(--border-color)', 
+                    borderRadius: '8px', 
+                    padding: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    background: '#ffffff'
+                  }}>
+                    {(() => {
+                      const currentClass = classes.find(c => c.id === parseInt(classId))
+                      const classStudents = (currentClass?.users || []).filter(u => u.role === 'student')
+                      const allowedList = labAttachments[activeAttachmentIdx].allowed_students || []
+                      const filtered = classStudents.filter(s => 
+                        !permSearchTerm || 
+                        s.username.toLowerCase().includes(permSearchTerm.toLowerCase()) || 
+                        (s.full_name && s.full_name.toLowerCase().includes(permSearchTerm.toLowerCase()))
+                      )
+
+                      if (classStudents.length === 0) {
+                        return (
+                          <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '12.5px' }}>
+                            No students enrolled in this class yet.
+                          </div>
+                        )
+                      }
+
+                      if (filtered.length === 0) {
+                        return (
+                          <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '12.5px' }}>
+                            No students matching search criteria.
+                          </div>
+                        )
+                      }
+
+                      return filtered.map(student => {
+                        const isChecked = allowedList.includes(student.username)
+                        return (
+                          <label 
+                            key={student.id} 
+                            style={{ 
+                              display: 'flex', 
+                              alignItems: 'center', 
+                              gap: '10px', 
+                              padding: '6px 10px', 
+                              borderRadius: '6px',
+                              background: isChecked ? 'rgba(0, 242, 254, 0.05)' : 'transparent',
+                              cursor: 'pointer',
+                              fontSize: '13px'
+                            }}
+                          >
+                            <input 
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                const updated = [...labAttachments]
+                                let currentAllowed = [...(updated[activeAttachmentIdx].allowed_students || [])]
+                                if (e.target.checked) {
+                                  if (!currentAllowed.includes(student.username)) {
+                                    currentAllowed.push(student.username)
+                                  }
+                                } else {
+                                  currentAllowed = currentAllowed.filter(u => u !== student.username)
+                                }
+                                updated[activeAttachmentIdx] = {
+                                  ...updated[activeAttachmentIdx],
+                                  allowed_students: currentAllowed
+                                }
+                                setLabAttachments(updated)
+                              }}
+                            />
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontWeight: '600', fontFamily: 'var(--font-mono)', color: 'var(--neon-cyan)', fontSize: '12px' }}>
+                                {student.username}
+                              </span>
+                              <span style={{ color: 'var(--text-primary)' }}>
+                                {student.full_name || '—'}
+                              </span>
+                            </div>
+                          </label>
+                        )
+                      })
+                    })()}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button 
+                type="button" 
+                onClick={() => setShowAttachmentPermModal(false)} 
+                className="btn btn-primary"
+                style={{ padding: '6px 18px' }}
+              >
+                APPLY & CLOSE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* INSTRUCTOR LAB PREVIEW MODAL */}
+      {showLabPreviewModal && previewLabData && (
+        <div className="modal-overlay" style={{ zIndex: 1050 }}>
+          <div className="modal-content" style={{ maxWidth: '1200px', width: '96vw', height: '92vh', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}>
+            
+            {/* Modal Header */}
+            <div className="modal-header" style={{ padding: '14px 20px', background: '#090d16', borderBottom: '1px solid rgba(0, 242, 254, 0.2)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <span className="badge" style={{ background: 'rgba(16, 185, 129, 0.2)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.4)', fontWeight: 'bold' }}>
+                  <Eye size={12} style={{ marginRight: '4px', verticalAlign: 'middle' }} /> INSTRUCTOR PREVIEW MODE
+                </span>
+                <h3 style={{ margin: 0, fontSize: '16px', color: '#ffffff', fontWeight: '600' }}>
+                  {previewLabData.title}
+                </h3>
+                <span className="badge badge-draft" style={{ fontFamily: 'var(--font-mono)', fontSize: '11px' }}>
+                  ID #{previewLabData.id}
+                </span>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => {
+                  setShowLabPreviewModal(false)
+                  setPreviewGuacamoleUrl('')
+                  setPreviewVmInfo(null)
+                }} 
+                className="btn-icon btn-secondary" 
+                style={{ width: '30px', height: '30px', color: '#94a3b8' }}
+                title="Close Preview"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Sub-header Tabs & Banner */}
+            <div style={{ background: '#0f172a', padding: '8px 20px', borderBottom: '1px solid #1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                {previewLabData.enable_vm !== false && (
+                  <button
+                    type="button"
+                    onClick={() => setPreviewLabTab('vm')}
+                    className={`btn ${previewLabTab === 'vm' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '5px 14px', fontSize: '12.5px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    <Monitor size={14} /> VDI Lab Desktop {previewVmInfo ? `(VMID ${previewVmInfo.vmid})` : ''}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewLabTab('guide')}
+                  className={`btn ${previewLabTab === 'guide' ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ padding: '5px 14px', fontSize: '12.5px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <BookOpen size={14} /> Lab Instructions & Guide
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewLabTab('form')}
+                  className={`btn ${previewLabTab === 'form' ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ padding: '5px 14px', fontSize: '12.5px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <FileCheck size={14} /> Questions Form ({(previewLabData.form_schema || []).length})
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {previewLabData.enable_vm !== false && previewLabTab === 'vm' && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => launchPreviewVmSession(previewLabData.id)}
+                      disabled={previewVmLoading}
+                      className="btn btn-secondary"
+                      style={{ padding: '4px 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                      title="Reconnect VM Session"
+                    >
+                      <RefreshCw size={13} className={previewVmLoading ? 'animate-spin' : ''} /> Reconnect
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePreviewVmRollback}
+                      disabled={previewVmLoading}
+                      className="btn btn-secondary"
+                      style={{ padding: '4px 10px', fontSize: '12px', color: 'var(--neon-ruby)', borderColor: 'rgba(239, 68, 68, 0.3)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                      title="Rollback VM to clean template snapshot"
+                    >
+                      <RotateCcw size={13} /> Reset VM
+                    </button>
+                  </>
+                )}
+                <span style={{ fontSize: '11.5px', color: '#94a3b8' }}>
+                  ⚡ Mock preview environment — No student grades or submissions affected
+                </span>
+              </div>
+            </div>
+
+            {/* Modal Body: Active Tab View */}
+            <div style={{ flex: 1, overflowY: 'auto', background: '#090d16', position: 'relative', display: 'flex', flexDirection: 'column' }}>
+              
+              {/* TAB 1: Guacamole VDI VM View */}
+              {previewLabTab === 'vm' && previewLabData.enable_vm !== false && (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
+                  {previewVmLoading ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: '#a5f3fc', gap: '14px' }}>
+                      <RefreshCw size={36} className="animate-spin" style={{ color: 'var(--neon-cyan)' }} />
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontWeight: '600', fontSize: '15px' }}>Provisioning & Connecting Instructor Preview VM...</div>
+                        <div style={{ fontSize: '12.5px', color: '#94a3b8', marginTop: '4px' }}>Communicating with Proxmox VE hypervisor and Guacamole gateway</div>
+                      </div>
+                    </div>
+                  ) : previewVmError ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: '30px', textAlign: 'center' }}>
+                      <AlertCircle size={42} style={{ color: 'var(--neon-ruby)', marginBottom: '12px' }} />
+                      <h4 style={{ color: '#fff', marginBottom: '8px' }}>VM Connection Notice</h4>
+                      <p style={{ color: '#94a3b8', maxWidth: '480px', fontSize: '13px', marginBottom: '18px' }}>{previewVmError}</p>
+                      <button
+                        type="button"
+                        onClick={() => launchPreviewVmSession(previewLabData.id)}
+                        className="btn btn-primary"
+                        style={{ padding: '8px 20px' }}
+                      >
+                        Retry Connection
+                      </button>
+                    </div>
+                  ) : previewGuacamoleUrl ? (
+                    <iframe
+                      ref={previewGuacRef}
+                      key={previewGuacamoleUrl}
+                      src={previewGuacamoleUrl}
+                      title="Instructor Preview Apache Guacamole VDI"
+                      style={{ width: '100%', height: '100%', border: 'none', flex: 1 }}
+                      allow="clipboard-read; clipboard-write; fullscreen; keyboard-map"
+                    />
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1 }}>
+                      <Monitor size={48} style={{ color: 'var(--neon-cyan)', marginBottom: '16px', opacity: 0.8 }} />
+                      <h4 style={{ color: '#fff', marginBottom: '8px' }}>Preview VM is ready to start</h4>
+                      <button
+                        type="button"
+                        onClick={() => launchPreviewVmSession(previewLabData.id)}
+                        className="btn btn-primary"
+                        style={{ padding: '8px 24px' }}
+                      >
+                        Launch VM Connection
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* TAB 2: Lab Instructions & Guide View */}
+              {previewLabTab === 'guide' && (
+                <div style={{ padding: '28px', maxWidth: '900px', margin: '0 auto', width: '100%' }}>
+                  <div className="cyber-card" style={{ background: '#0f172a', border: '1px solid #1e293b', padding: '24px', borderRadius: '10px' }}>
+                    <h3 style={{ fontSize: '18px', color: 'var(--neon-cyan)', marginBottom: '14px', borderBottom: '1px solid #1e293b', paddingBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <BookOpen size={18} /> Lab Instructions & Guide
+                    </h3>
+                    <div style={{ fontSize: '14px', lineHeight: '1.7', color: '#e2e8f0' }}>
+                      {parseMarkdown(previewLabData.description)}
+                    </div>
+                  </div>
+
+                  {/* Attachments Section if present */}
+                  {Array.isArray(previewLabData.attachments) && previewLabData.attachments.length > 0 && (
+                    <div className="cyber-card" style={{ background: '#0f172a', border: '1px solid #1e293b', padding: '20px', borderRadius: '10px', marginTop: '20px' }}>
+                      <h4 style={{ fontSize: '15px', color: '#ffffff', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Paperclip size={16} style={{ color: 'var(--neon-cyan)' }} /> Attached Reference Files & Docs ({previewLabData.attachments.length})
+                      </h4>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {previewLabData.attachments.map((att, aIdx) => (
+                          <div key={aIdx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: '#1e293b', borderRadius: '6px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <FileText size={16} style={{ color: 'var(--neon-cyan)' }} />
+                              <div>
+                                <span style={{ fontWeight: '500', color: '#f8fafc', fontSize: '13.5px' }}>{att.filename}</span>
+                                {att.file_size && (
+                                  <span style={{ fontSize: '11.5px', color: '#94a3b8', marginLeft: '8px' }}>
+                                    ({(att.file_size / 1024).toFixed(1)} KB)
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                              <button
+                                type="button"
+                                onClick={() => openAttachmentPreview(att.download_url, att.filename)}
+                                className="btn btn-secondary"
+                                style={{ padding: '4px 10px', fontSize: '12px' }}
+                              >
+                                <Eye size={13} style={{ marginRight: '4px' }} /> View
+                              </button>
+                              <a
+                                href={`${att.download_url}&download=true`}
+                                className="btn btn-secondary"
+                                style={{ padding: '4px 10px', fontSize: '12px' }}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                <Download size={13} style={{ marginRight: '4px' }} /> Download
+                              </a>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* TAB 3: Dynamic Questions Form Mock */}
+              {previewLabTab === 'form' && (
+                <div style={{ padding: '28px', maxWidth: '850px', margin: '0 auto', width: '100%' }}>
+                  <div className="cyber-card" style={{ background: '#0f172a', border: '1px solid #1e293b', padding: '24px', borderRadius: '10px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid #1e293b', paddingBottom: '10px' }}>
+                      <h3 style={{ fontSize: '17px', color: '#ffffff', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <FileCheck size={18} style={{ color: 'var(--neon-cyan)' }} /> Student Submission Form Preview
+                      </h3>
+                      <span className="badge badge-submitted" style={{ fontSize: '11px' }}>
+                        {(previewLabData.form_schema || []).length} Questions
+                      </span>
+                    </div>
+
+                    {(!previewLabData.form_schema || previewLabData.form_schema.length === 0) ? (
+                      <div style={{ padding: '30px', textAlign: 'center', color: '#94a3b8', border: '1px dashed #334155', borderRadius: '8px' }}>
+                        This lab currently has no dynamic questions configured. Students submit standard report files.
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                        {previewLabData.form_schema.map((field, fIdx) => (
+                          <div key={field.id || fIdx} style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                            <label style={{ display: 'block', marginBottom: '8px', fontWeight: '600', color: '#f1f5f9', fontSize: '14px' }}>
+                              <span style={{ color: 'var(--neon-cyan)', marginRight: '6px' }}>Q{fIdx + 1}.</span>
+                              {field.label}
+                              {field.required && <span style={{ color: 'var(--neon-ruby)', marginLeft: '4px' }}>*</span>}
+                              {field.max_score && (
+                                <span className="badge badge-draft" style={{ marginLeft: '8px', fontSize: '10px' }}>
+                                  {field.max_score} pts
+                                </span>
+                              )}
+                            </label>
+
+                            {field.type === 'text' && (
+                              <input
+                                type="text"
+                                className="form-input"
+                                placeholder="Short text answer..."
+                                style={{ background: '#090d16', color: '#fff', borderColor: '#475569' }}
+                                value={previewAnswers[field.id] || ''}
+                                onChange={(e) => setPreviewAnswers({ ...previewAnswers, [field.id]: e.target.value })}
+                              />
+                            )}
+
+                            {field.type === 'textarea' && (
+                              <textarea
+                                className="form-input"
+                                rows={3}
+                                placeholder="Detailed response / analysis findings..."
+                                style={{ background: '#090d16', color: '#fff', borderColor: '#475569' }}
+                                value={previewAnswers[field.id] || ''}
+                                onChange={(e) => setPreviewAnswers({ ...previewAnswers, [field.id]: e.target.value })}
+                              />
+                            )}
+
+                            {field.type === 'multiple_choice' && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
+                                {(field.options || []).map((opt, oIdx) => (
+                                  <label key={oIdx} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#cbd5e1', cursor: 'pointer', fontSize: '13.5px' }}>
+                                    <input
+                                      type="radio"
+                                      name={`preview_q_${field.id}`}
+                                      checked={previewAnswers[field.id] === opt}
+                                      onChange={() => setPreviewAnswers({ ...previewAnswers, [field.id]: opt })}
+                                    />
+                                    <span>{opt}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            )}
+
+                            {field.type === 'file' && (
+                              <div style={{ padding: '16px', border: '1px dashed #475569', borderRadius: '6px', textAlign: 'center', background: '#090d16', color: '#94a3b8', fontSize: '13px' }}>
+                                <Upload size={20} style={{ color: 'var(--neon-cyan)', marginBottom: '6px' }} />
+                                <div>Student file upload field ({field.allowed_types || 'PDF, DOCX, ZIP, PNG'})</div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+            {/* Modal Footer */}
+            <div className="modal-footer" style={{ padding: '12px 20px', background: '#090d16', borderTop: '1px solid rgba(0, 242, 254, 0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '12px', color: '#64748b' }}>
+                Previewing as Instructor — Close when finished testing
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLabPreviewModal(false)
+                  setPreviewGuacamoleUrl('')
+                  setPreviewVmInfo(null)
+                }}
+                className="btn btn-secondary"
+                style={{ padding: '6px 20px' }}
+              >
+                CLOSE PREVIEW
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
     </div>
   )
 }
+
 

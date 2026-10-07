@@ -86,6 +86,12 @@ class Settings:
         }
         # Tự động hỗ trợ docx cho bài nộp báo cáo Word của sinh viên
         self.ALLOWED_EXTENSIONS.add("docx")
+        # Tự động hỗ trợ các định dạng mã nguồn / file code cho bài tập thực hành
+        CODE_EXTENSIONS = {
+            "c", "cpp", "h", "hpp", "py", "java", "asm", "s", "js", "ts",
+            "html", "css", "json", "sql", "sh", "ps1", "rs", "go", "php"
+        }
+        self.ALLOWED_EXTENSIONS.update(CODE_EXTENSIONS)
         self.MALWARE_ZIP_PASSWORD = _required_env("MALWARE_ZIP_PASSWORD")
 
         # Proxmox VE
@@ -95,6 +101,11 @@ class Settings:
         self.PVE_TOKEN_VALUE = _required_env("PVE_TOKEN_VALUE")
         self.PVE_NODE = _required_env("PVE_NODE")
         self.PVE_VERIFY_SSL = _required_bool("PVE_VERIFY_SSL")
+        self.PVE_SSH_HOST = os.getenv("PVE_SSH_HOST", self.PVE_API_HOST)
+        self.PVE_SSH_USER = os.getenv("PVE_SSH_USER", "root")
+        self.PVE_SSH_KEY = os.getenv("PVE_SSH_KEY", "/root/.ssh/id_pve_sync")
+        self.PVE_TOOLS_DIR = os.getenv("PVE_TOOLS_DIR", "/var/lib/vz/template/iso/tools-content")
+        self.PVE_ISO_PATH = os.getenv("PVE_ISO_PATH", "/var/lib/vz/template/iso/tools-1001.iso")
 
         self.TEMPLATE_VMID_MIN = _required_int("TEMPLATE_VMID_MIN", minimum=1)
         self.TEMPLATE_VMID_MAX = _required_int("TEMPLATE_VMID_MAX", minimum=1)

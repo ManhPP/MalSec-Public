@@ -153,10 +153,8 @@ def upload_submission_file(
     elif submission.status == "submitted" and now <= effective_deadline:
         submission.status = "draft"
 
-    # Cập nhật thông tin file đính kèm vào submission
+    # Cập nhật danh sách file đính kèm (cho phép đính kèm nhiều file trên cùng 1 trường)
     current_attachments = list(submission.file_attachments or [])
-    # Xóa file cũ liên kết với trường này nếu có
-    current_attachments = [a for a in current_attachments if a.get("field_id") != field_id]
     
     attachment_record = {
         "field_id": field_id,
@@ -169,9 +167,12 @@ def upload_submission_file(
     current_attachments.append(attachment_record)
     submission.file_attachments = current_attachments
     
-    # Đồng thời lưu tên file vào trường text của câu hỏi để hiển thị
+    # Cập nhật answers[field_id] thành danh sách tên các file đính kèm của field này
+    field_file_names = [
+        a["original_filename"] for a in current_attachments if a.get("field_id") == field_id
+    ]
     current_answers = dict(submission.answers or {})
-    current_answers[field_id] = saved_file_info["original_filename"]
+    current_answers[field_id] = ", ".join(field_file_names)
     submission.answers = current_answers
     
     db.commit()
@@ -179,7 +180,75 @@ def upload_submission_file(
     return {
         "field_id": field_id,
         "filename": saved_file_info["original_filename"],
+        "total_files": len(field_file_names),
         "message": "Tải file lên thành công và đã được quét bảo mật an toàn!"
+    }
+
+@router.delete("/lab/{lab_id}/attachment/{field_id}")
+def delete_submission_attachment(
+    lab_id: int,
+    field_id: str,
+    filepath: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_student)
+):
+    """API Cho phép sinh viên xóa 1 tệp đính kèm trong bài làm (nếu chưa nộp hoặc trước hạn)"""
+    submission = db.query(Submission).filter(
+        Submission.lab_id == lab_id,
+        Submission.student_id == current_user.id
+    ).first()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài làm")
+
+    lab = db.query(Lab).filter(Lab.id == lab_id, Lab.is_active == True).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+
+    now = datetime.now()
+    effective_deadline = _get_student_lab_deadline(lab, current_user.username)
+
+    if submission.status == "graded":
+        raise HTTPException(status_code=400, detail="Bài làm đã được chấm điểm, không thể xóa tệp")
+    if submission.status == "submitted" and now > effective_deadline:
+        raise HTTPException(status_code=400, detail="Bài lab đã hết hạn, không thể thay đổi tệp đã nộp")
+
+    current_attachments = list(submission.file_attachments or [])
+    updated_attachments = [a for a in current_attachments if not (a.get("field_id") == field_id and a.get("filepath") == filepath)]
+    
+    if len(updated_attachments) == len(current_attachments):
+        raise HTTPException(status_code=404, detail="Không tìm thấy tệp đính kèm cần xóa")
+
+    # Xóa tệp vật lý trên đĩa nếu tồn tại trong UPLOAD_DIR
+    try:
+        normalized_path = os.path.abspath(filepath)
+        normalized_upload_dir = os.path.abspath(settings.UPLOAD_DIR)
+        if normalized_path.startswith(normalized_upload_dir) and os.path.exists(normalized_path):
+            os.remove(normalized_path)
+    except Exception as err:
+        logger.warning(f"Error removing physical attachment file: {err}")
+
+    submission.file_attachments = updated_attachments
+    
+    # Cập nhật lại answers[field_id]
+    remaining_names = [
+        a["original_filename"] for a in updated_attachments if a.get("field_id") == field_id
+    ]
+    current_answers = dict(submission.answers or {})
+    if remaining_names:
+        current_answers[field_id] = ", ".join(remaining_names)
+    else:
+        current_answers.pop(field_id, None)
+    submission.answers = current_answers
+
+    if submission.status == "submitted" and now <= effective_deadline:
+        submission.status = "draft"
+
+    db.commit()
+    db.refresh(submission)
+
+    return {
+        "message": "Đã xóa tệp đính kèm thành công",
+        "remaining_files": len(remaining_names)
     }
 
 @router.post("/lab/{lab_id}/submit", response_model=SubmissionOut)
@@ -275,7 +344,117 @@ def get_all_submissions_for_lab(
         if not class_exists or current_user not in class_exists.users:
             raise HTTPException(status_code=403, detail="Bạn không quản lý lớp học phần chứa bài lab này")
             
-    return db.query(Submission).filter(Submission.lab_id == lab_id).order_by(Submission.submitted_at.desc()).all()
+    # Lấy toàn bộ sinh viên được phân công vào lớp học phần này
+    enrolled_students = []
+    if lab.class_:
+        enrolled_students = [u for u in lab.class_.users if u.role == "student"]
+    else:
+        class_obj = db.query(Class).filter(Class.id == lab.class_id).first()
+        if class_obj:
+            enrolled_students = [u for u in class_obj.users if u.role == "student"]
+
+    existing_subs = db.query(Submission).filter(Submission.lab_id == lab_id).all()
+    sub_by_student_id = {s.student_id: s for s in existing_subs}
+
+    # Đảm bảo mọi sinh viên trong lớp đều có bản ghi Submission (kể cả chưa vào hoặc chưa nộp)
+    new_stubs = False
+    for student in enrolled_students:
+        if student.id not in sub_by_student_id:
+            stub_sub = Submission(
+                lab_id=lab_id,
+                student_id=student.id,
+                answers={},
+                file_attachments=[],
+                status="draft",
+                score=None,
+                late_penalty=0.0
+            )
+            db.add(stub_sub)
+            new_stubs = True
+
+    if new_stubs:
+        db.commit()
+
+    # Trả về toàn bộ danh sách sinh viên: ưu tiên các bài đã nộp/đã chấm lên trước, sắp xếp theo tên sinh viên
+    all_subs = db.query(Submission).filter(Submission.lab_id == lab_id).all()
+    # Sắp xếp có thứ tự ổn định: submitted/graded lên đầu, hoặc theo tên
+    all_subs.sort(key=lambda s: (
+        0 if s.status in ['submitted', 'graded'] else 1,
+        s.student.full_name if s.student else ""
+    ))
+    return all_subs
+
+@router.get("/class/{class_id}/student/{student_id}")
+def get_student_submissions_for_class(
+    class_id: int,
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Lấy toàn bộ các bài lab và bài làm tương ứng của một sinh viên cụ thể trong lớp để chấm điểm"""
+    class_ = db.query(Class).filter(Class.id == class_id).first()
+    if not class_:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lớp học phần")
+
+    if current_user.role == "lecturer" and current_user not in class_.users:
+        raise HTTPException(status_code=403, detail="Bạn không quản lý lớp học phần này")
+
+    student = db.query(User).filter(User.id == student_id, User.role == "student").first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Không tìm thấy sinh viên")
+
+    if student not in class_.users:
+        raise HTTPException(status_code=400, detail="Sinh viên không thuộc lớp học phần này")
+
+    # Lấy toàn bộ bài lab thuộc lớp, sắp xếp theo deadline tăng dần / id
+    labs = sorted(class_.labs, key=lambda l: (l.deadline or datetime.max, l.id))
+    
+    # Tìm các bài nộp hiện có của sinh viên cho các lab trong lớp
+    lab_ids = [l.id for l in labs]
+    existing_subs = db.query(Submission).filter(
+        Submission.student_id == student_id,
+        Submission.lab_id.in_(lab_ids)
+    ).all() if lab_ids else []
+    sub_map = {s.lab_id: s for s in existing_subs}
+
+    new_stubs = False
+    for lab in labs:
+        if lab.id not in sub_map:
+            stub = Submission(
+                lab_id=lab.id,
+                student_id=student_id,
+                answers={},
+                file_attachments=[],
+                status="draft",
+                score=None,
+                late_penalty=0.0
+            )
+            db.add(stub)
+            sub_map[lab.id] = stub
+            new_stubs = True
+
+    if new_stubs:
+        db.commit()
+        for lab in labs:
+            db.refresh(sub_map[lab.id])
+
+    # Convert to response structure
+    from app.schemas import UserOut, LabOut, SubmissionOut
+    labs_result = []
+    for lab in labs:
+        sub = sub_map.get(lab.id)
+        labs_result.append({
+            "lab": LabOut.model_validate(lab),
+            "submission": SubmissionOut.model_validate(sub) if sub else None
+        })
+
+    return {
+        "student": UserOut.model_validate(student),
+        "class_id": class_.id,
+        "class_name": class_.name,
+        "semester": class_.semester,
+        "labs": labs_result
+    }
 
 @router.post("/{submission_id}/grade", response_model=SubmissionOut)
 def grade_submission(
@@ -489,13 +668,32 @@ def get_submission_file(
         
     # 3. Phân quyền truy cập tệp
     if current_user.role == "student":
-        student_subs = db.query(Submission).filter(Submission.student_id == current_user.id).all()
+        student_class_ids = [c.id for c in current_user.classes]
         allowed = False
-        for sub in student_subs:
-            attachments = sub.file_attachments or []
-            if any(att.get("filepath") == path for att in attachments):
-                allowed = True
+        
+        # Kiểm tra xem file có thuộc tài liệu bài lab của các lớp sinh viên tham gia không
+        student_labs = db.query(Lab).filter(Lab.class_id.in_(student_class_ids), Lab.is_active == True).all()
+        for l in student_labs:
+            lab_files = l.attachment_files or []
+            for att in lab_files:
+                if att.get("filepath") == path:
+                    vis_mode = att.get("visibility_mode", "all")
+                    allowed_users = att.get("allowed_students", [])
+                    if vis_mode == "all" or current_user.username in allowed_users:
+                        allowed = True
+                        break
+            if allowed:
                 break
+
+        if not allowed:
+            # Kiểm tra xem file có thuộc bài nộp của chính sinh viên này không
+            student_subs = db.query(Submission).filter(Submission.student_id == current_user.id).all()
+            for sub in student_subs:
+                attachments = sub.file_attachments or []
+                if any(att.get("filepath") == path for att in attachments):
+                    allowed = True
+                    break
+                    
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -504,18 +702,30 @@ def get_submission_file(
     elif current_user.role == "lecturer":
         lecturer_class_ids = [c.id for c in current_user.classes]
         allowed = False
-        all_subs = db.query(Submission).all()
-        for sub in all_subs:
-            attachments = sub.file_attachments or []
-            if any(att.get("filepath") == path for att in attachments):
-                lab = db.query(Lab).filter(Lab.id == sub.lab_id).first()
-                if lab and lab.class_id in lecturer_class_ids:
-                    allowed = True
-                    break
+
+        # Kiểm tra xem file có thuộc tài liệu bài lab của các lớp giảng viên quản lý không
+        lecturer_labs = db.query(Lab).filter(Lab.class_id.in_(lecturer_class_ids)).all()
+        for l in lecturer_labs:
+            lab_files = l.attachment_files or []
+            if any(att.get("filepath") == path for att in lab_files):
+                allowed = True
+                break
+
+        if not allowed:
+            # Kiểm tra xem file có thuộc bài nộp của lớp giảng viên quản lý không
+            all_subs = db.query(Submission).all()
+            for sub in all_subs:
+                attachments = sub.file_attachments or []
+                if any(att.get("filepath") == path for att in attachments):
+                    lab = db.query(Lab).filter(Lab.id == sub.lab_id).first()
+                    if lab and lab.class_id in lecturer_class_ids:
+                        allowed = True
+                        break
+                        
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Bạn không quản lý lớp học chứa bài nộp có tệp tin này"
+                detail="Bạn không quản lý lớp học chứa bài lab hoặc bài nộp có tệp tin này"
             )
 
     # 4. Phục vụ tệp
@@ -528,7 +738,7 @@ def get_submission_file(
             media_type="application/octet-stream"
         )
         
-    # Xác định media type cơ bản cho hiển thị ảnh
+    # Xác định media type cơ bản cho hiển thị ảnh, văn bản và source code
     ext = filename.split('.')[-1].lower() if '.' in filename else ''
     media_type = "application/octet-stream"
     if ext in ['png', 'jpg', 'jpeg']:
@@ -537,7 +747,9 @@ def get_submission_file(
         media_type = "application/pdf"
     elif ext == 'docx':
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    elif ext in ['txt', 'log']:
-        media_type = "text/plain"
+    elif ext in ['txt', 'log', 'c', 'cpp', 'h', 'hpp', 'py', 'java', 'asm', 's', 'js', 'ts', 'html', 'css', 'sql', 'sh', 'ps1', 'rs', 'go']:
+        media_type = "text/plain; charset=utf-8"
+    elif ext == 'json':
+        media_type = "application/json"
         
     return FileResponse(path=normalized_path, media_type=media_type)

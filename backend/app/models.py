@@ -66,6 +66,10 @@ class Lab(Base):
     # [{id: "q1", type: "text"|"textarea"|"select"|"file", label: "...", options: ["...", "..."], required: true}]
     form_fields = Column(JSONB, nullable=False, server_default='[]')
     
+    # attachment_files lưu danh sách tài liệu/file đính kèm của bài lab do giảng viên cung cấp
+    # [{filename: "guideline.pdf", original_filename: "HuongDan.pdf", filepath: "/app/uploads/...", size_bytes: 12345, uploaded_at: "..."}]
+    attachment_files = Column(JSONB, nullable=False, server_default='[]')
+    
     deadline = Column(DateTime, nullable=False)
     
     # late_policy lưu cấu hình phạt nộp muộn
@@ -87,6 +91,21 @@ class Lab(Base):
     vm_port = Column(Integer, default=lambda: settings.DEFAULT_VM_PORT, nullable=False)
     vm_username = Column(String, nullable=True)
     vm_password = Column(String, nullable=True)
+    # VM Drive D: Content Configuration
+    # vm_drive_mode: 'default' (uses tools-1001.iso) or 'custom' (uses lab-{id}.iso)
+    vm_drive_mode = Column(String, default='default', server_default='default', nullable=False)
+    # vm_drive_files: list of selected filenames or metadata e.g. ['static.zip', 'malware1.exe']
+    vm_drive_files = Column(JSONB, nullable=False, server_default='[]')
+    # VM Clipboard Isolation: Chặn copy từ trong máy ảo ra ngoài máy thật
+    disable_vm_copy = Column(Boolean, default=False, server_default='false', nullable=False)
+    # Chặn dán từ máy thật vào trong máy ảo
+    disable_vm_paste = Column(Boolean, default=False, server_default='false', nullable=False)
+    # Chế độ kiểm tra / thi (Exam Mode)
+    is_exam_mode = Column(Boolean, default=False, server_default='false', nullable=False)
+    # Tùy chỉnh phần cứng VM (Cores, RAM MB)
+    cpu_cores = Column(Integer, nullable=True)
+    ram_mb = Column(Integer, nullable=True)
+
     class_id = Column(Integer, ForeignKey('classes.id', ondelete='CASCADE'), nullable=False)
 
     created_by_id = Column(Integer, ForeignKey('users.id'), nullable=False)
@@ -140,3 +159,17 @@ class AuditLog(Base):
 
     # Relationships
     user = relationship('User', back_populates='audit_logs')
+
+
+class VmToolFile(Base):
+    __tablename__ = 'vm_tool_files'
+
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String, nullable=False, index=True)
+    scope = Column(String, nullable=False, default='common', index=True)  # 'common' hoặc 'lecturer_<username>'
+    uploaded_by_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    size_bytes = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.now)
+
+    # Relationships
+    uploaded_by = relationship('User')

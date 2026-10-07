@@ -109,6 +109,7 @@ class LabBase(BaseModel):
     description: Optional[str] = None
     grade_tag: Optional[str] = None
     form_fields: List[Dict[str, Any]] = []
+    attachment_files: Optional[List[Dict[str, Any]]] = []
     deadline: datetime
     late_policy: Dict[str, Any] = {
         "allow_late": True,
@@ -123,6 +124,13 @@ class LabBase(BaseModel):
     vm_protocol: Literal["rdp", "vnc", "ssh"] = settings.DEFAULT_VM_PROTOCOL
     vm_port: int = Field(default=settings.DEFAULT_VM_PORT, ge=1, le=65535)
     vm_username: Optional[str] = None
+    vm_drive_mode: Optional[Literal["default", "custom"]] = "default"
+    vm_drive_files: Optional[List[str]] = []
+    disable_vm_copy: Optional[bool] = False
+    disable_vm_paste: Optional[bool] = False
+    is_exam_mode: Optional[bool] = False
+    cpu_cores: Optional[int] = None
+    ram_mb: Optional[int] = None
     class_id: int
 
 class LabCreate(LabBase):
@@ -133,6 +141,7 @@ class LabUpdate(BaseModel):
     description: Optional[str] = None
     grade_tag: Optional[str] = None
     form_fields: Optional[List[Dict[str, Any]]] = None
+    attachment_files: Optional[List[Dict[str, Any]]] = None
     deadline: Optional[datetime] = None
     late_policy: Optional[Dict[str, Any]] = None
     individual_extensions: Optional[Dict[str, str]] = None
@@ -144,6 +153,13 @@ class LabUpdate(BaseModel):
     vm_port: Optional[int] = Field(default=None, ge=1, le=65535)
     vm_username: Optional[str] = None
     vm_password: Optional[str] = Field(default=None, min_length=1)
+    vm_drive_mode: Optional[Literal["default", "custom"]] = None
+    vm_drive_files: Optional[List[str]] = None
+    disable_vm_copy: Optional[bool] = None
+    disable_vm_paste: Optional[bool] = None
+    is_exam_mode: Optional[bool] = None
+    cpu_cores: Optional[int] = None
+    ram_mb: Optional[int] = None
     class_id: Optional[int] = None
 
 class LabClone(BaseModel):

@@ -389,7 +389,22 @@ const Layout = ({ children }) => {
           
           <div className="nav-links">
             {user.role === 'admin' && (
-              <span className="badge badge-draft">Admin Portal</span>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <Link 
+                  to="/admin" 
+                  className={`badge ${window.location.hash.startsWith('#/admin') ? 'badge-submitted' : 'badge-draft'}`}
+                  style={{ textDecoration: 'none', cursor: 'pointer', padding: '5px 12px', fontWeight: 'bold' }}
+                >
+                  🛡️ Admin Portal
+                </Link>
+                <Link 
+                  to="/lecturer" 
+                  className={`badge ${window.location.hash.startsWith('#/lecturer') ? 'badge-submitted' : 'badge-draft'}`}
+                  style={{ textDecoration: 'none', cursor: 'pointer', padding: '5px 12px' }}
+                >
+                  👨‍🏫 Instructor View
+                </Link>
+              </div>
             )}
             {user.role === 'lecturer' && (
               <span className="badge badge-submitted">Instructor Portal</span>
@@ -516,19 +531,74 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  // Restore session from LocalStorage
+  // Restore session and validate token against backend
   useEffect(() => {
     clearGuacamoleAuth()
     const storedUser = localStorage.getItem('malsec_user')
     const token = localStorage.getItem('malsec_token')
-    if (storedUser && token) {
-      setUser(JSON.parse(storedUser))
+
+    const validateSession = async () => {
+      if (storedUser && token) {
+        try {
+          const parsed = JSON.parse(storedUser)
+          setUser(parsed)
+
+          // Verify token validity with backend
+          const res = await fetch('/api/auth/me', {
+            headers: { 'Authorization': `Bearer ${token}` }
+          })
+          if (!res.ok) {
+            // Token expired or invalid
+            console.warn('Session token expired or invalid, logging out')
+            sessionStorage.setItem('malsec_session_expired', 'Your session has expired. Please sign in again.')
+            clearGuacamoleAuth()
+            localStorage.removeItem('malsec_user')
+            localStorage.removeItem('malsec_token')
+            setUser(null)
+          }
+        } catch (e) {
+          clearGuacamoleAuth()
+          localStorage.removeItem('malsec_user')
+          localStorage.removeItem('malsec_token')
+          setUser(null)
+        }
+      }
+      setLoading(false)
     }
-    setLoading(false)
+
+    validateSession()
+  }, [])
+
+  // Global 401 fetch interceptor: automatically detect session expiration across all API calls
+  useEffect(() => {
+    const originalFetch = window.fetch
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args)
+      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || ''
+      // Ignore login endpoint 401s (wrong password should not trigger session expired banner)
+      if (response.status === 401 && !url.includes('/api/auth/login') && !url.includes('/api/auth/swagger-login')) {
+        const token = localStorage.getItem('malsec_token')
+        if (token) {
+          console.warn('[AUTH] 401 received from', url, '- terminating expired session')
+          sessionStorage.setItem('malsec_session_expired', 'Your session has expired. Please sign in again.')
+          clearGuacamoleAuth()
+          localStorage.removeItem('malsec_user')
+          localStorage.removeItem('malsec_token')
+          setUser(null)
+          window.location.hash = '#/login'
+        }
+      }
+      return response
+    }
+
+    return () => {
+      window.fetch = originalFetch
+    }
   }, [])
 
   const login = (userData, token) => {
     clearGuacamoleAuth()
+    sessionStorage.removeItem('malsec_session_expired')
     localStorage.setItem('malsec_user', JSON.stringify(userData))
     localStorage.setItem('malsec_token', token)
     setUser(userData)
@@ -536,6 +606,7 @@ export default function App() {
 
   const logout = () => {
     clearGuacamoleAuth()
+    sessionStorage.removeItem('malsec_session_expired')
     localStorage.removeItem('malsec_user')
     localStorage.removeItem('malsec_token')
     setUser(null)
