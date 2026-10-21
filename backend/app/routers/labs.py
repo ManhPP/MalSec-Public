@@ -2,16 +2,16 @@ import os
 import shutil
 import zipfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File, Query, Form
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Dict, Any, Optional
 from app.database import get_db
 from app.config import settings
 from app.logging_config import logger
-from app.models import Lab, User, Class, AuditLog, VmToolFile
+from app.models import Lab, User, Class, AuditLog, VmToolFile, ExtensionRequest
 from app.request_utils import get_client_ip
-from app.schemas import LabOut, LabCreate, LabUpdate, LabClone
+from app.schemas import LabOut, LabCreate, LabUpdate, LabClone, ExtensionRequestCreate, ExtensionRequestRespond, ExtensionRequestBatchRespond, ExtensionRequestOut
 from app.security import require_lecturer, require_student, get_current_user, require_any_user
 from app.services.file_service import FileService
 
@@ -558,6 +558,231 @@ def update_individual_extensions(
     
     return lab
 
+# --- EXTENSION REQUEST ENDPOINTS ---
+
+@router.post("/{lab_id}/extension-request", response_model=Dict[str, Any])
+def create_extension_request(
+    lab_id: int,
+    payload: ExtensionRequestCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_student)
+):
+    """API Sinh viên gửi yêu cầu mở hạn nộp bài khi đã hết hạn"""
+    lab = db.query(Lab).filter(Lab.id == lab_id, Lab.is_active == True).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+
+    # Kiểm tra bài lab có thuộc lớp học của sinh viên hay không
+    student_class_ids = [c.id for c in current_user.classes]
+    if lab.class_id not in student_class_ids:
+        raise HTTPException(status_code=403, detail="Bạn không thuộc lớp học có bài lab này")
+
+    # Kiểm tra xem có yêu cầu đang pending hay không
+    existing_pending = db.query(ExtensionRequest).filter(
+        ExtensionRequest.lab_id == lab_id,
+        ExtensionRequest.student_id == current_user.id,
+        ExtensionRequest.status == "pending"
+    ).first()
+    if existing_pending:
+        existing_pending.reason = payload.reason
+        existing_pending.created_at = datetime.now()
+        db.commit()
+        return {"success": True, "message": "Đã cập nhật yêu cầu gia hạn nộp bài chờ giảng viên phê duyệt"}
+
+    ext_req = ExtensionRequest(
+        lab_id=lab_id,
+        student_id=current_user.id,
+        reason=payload.reason,
+        status="pending"
+    )
+    db.add(ext_req)
+    db.commit()
+    db.refresh(ext_req)
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action="extension_request_create",
+        target=f"Student {current_user.username} requested deadline extension for Lab ID {lab.id}",
+        ip_address=get_client_ip(request)
+    )
+    db.add(log)
+    db.commit()
+
+    return {"success": True, "message": "Đã gửi yêu cầu gia hạn nộp bài thành công tới giảng viên"}
+
+@router.get("/{lab_id}/extension-requests", response_model=List[ExtensionRequestOut])
+def get_lab_extension_requests(
+    lab_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_user)
+):
+    """API Lấy danh sách yêu cầu gia hạn (Giảng viên/Admin: toàn bộ của lab; Sinh viên: của chính mình)"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+
+    if current_user.role == "student":
+        return db.query(ExtensionRequest).options(joinedload(ExtensionRequest.student)).filter(
+            ExtensionRequest.lab_id == lab_id,
+            ExtensionRequest.student_id == current_user.id
+        ).order_by(ExtensionRequest.created_at.desc()).all()
+
+    if current_user.role == "lecturer":
+        class_exists = db.query(Class).filter(Class.id == lab.class_id).first()
+        if not class_exists or current_user not in class_exists.users:
+            raise HTTPException(status_code=403, detail="Bạn không quản lý lớp chứa bài lab này")
+
+    return db.query(ExtensionRequest).options(joinedload(ExtensionRequest.student)).filter(
+        ExtensionRequest.lab_id == lab_id
+    ).order_by(ExtensionRequest.created_at.desc()).all()
+
+@router.post("/extension-requests/{request_id}/respond", response_model=Dict[str, Any])
+def respond_extension_request(
+    request_id: int,
+    payload: ExtensionRequestRespond,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Giảng viên/Admin phê duyệt hoặc từ chối yêu cầu gia hạn của sinh viên"""
+    ext_req = db.query(ExtensionRequest).filter(ExtensionRequest.id == request_id).first()
+    if not ext_req:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu gia hạn")
+
+    lab = db.query(Lab).filter(Lab.id == ext_req.lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
+
+    if current_user.role == "lecturer":
+        class_exists = db.query(Class).filter(Class.id == lab.class_id).first()
+        if not class_exists or current_user not in class_exists.users:
+            raise HTTPException(status_code=403, detail="Bạn không quản lý lớp học chứa bài lab này")
+
+    student = db.query(User).filter(User.id == ext_req.student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Không tìm thấy sinh viên của yêu cầu này")
+
+    ext_req.status = payload.status
+    ext_req.response_note = payload.response_note
+    ext_req.responded_at = datetime.now()
+
+    if payload.status == "approved":
+        new_deadline = payload.granted_deadline
+        if not new_deadline:
+            # Mặc định gia hạn thêm 24 giờ nếu không cung cấp mốc giờ cụ thể
+            new_deadline = datetime.now() + timedelta(days=1)
+        elif new_deadline.tzinfo is not None:
+            new_deadline = new_deadline.replace(tzinfo=None)
+
+        ext_req.granted_deadline = new_deadline
+        
+        # Cập nhật thẳng vào individual_extensions của Lab (lưu chuỗi ISO offset-naive)
+        current_exts = dict(lab.individual_extensions or {})
+        current_exts[student.username] = new_deadline.isoformat()
+        lab.individual_extensions = current_exts
+    else:
+        ext_req.granted_deadline = None
+
+    db.commit()
+    db.refresh(ext_req)
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action=f"extension_request_{payload.status}",
+        target=f"Responded {payload.status} to extension request #{ext_req.id} for {student.username} on Lab {lab.id}",
+        ip_address=get_client_ip(request)
+    )
+    db.add(log)
+    db.commit()
+
+    return {
+        "success": True, 
+        "status": ext_req.status,
+        "message": f"Successfully {'approved' if ext_req.status == 'approved' else 'rejected'} deadline extension request for {student.username}."
+    }
+
+@router.post("/{lab_id}/extension-requests/batch-respond", response_model=Dict[str, Any])
+def batch_respond_extension_requests(
+    lab_id: int,
+    payload: ExtensionRequestBatchRespond,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_lecturer)
+):
+    """API Giảng viên/Admin phê duyệt hoặc từ chối hàng loạt yêu cầu gia hạn của bài lab"""
+    lab = db.query(Lab).filter(Lab.id == lab_id).first()
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab assignment not found")
+
+    if current_user.role == "lecturer":
+        class_exists = db.query(Class).filter(Class.id == lab.class_id).first()
+        if not class_exists or current_user not in class_exists.users:
+            raise HTTPException(status_code=403, detail="You do not manage the class containing this lab assignment")
+
+    # Tìm các requests cần xử lý
+    query = db.query(ExtensionRequest).options(joinedload(ExtensionRequest.student)).filter(
+        ExtensionRequest.lab_id == lab_id,
+        ExtensionRequest.status == "pending"
+    )
+    if payload.request_ids:
+        query = query.filter(ExtensionRequest.id.in_(payload.request_ids))
+    
+    requests_to_process = query.all()
+    if not requests_to_process:
+        return {
+            "success": True,
+            "processed_count": 0,
+            "message": "No pending extension requests found to process."
+        }
+
+    now = datetime.now()
+    new_deadline = payload.granted_deadline
+    if payload.status == "approved":
+        if not new_deadline:
+            new_deadline = now + timedelta(days=1)
+        elif new_deadline.tzinfo is not None:
+            new_deadline = new_deadline.replace(tzinfo=None)
+
+    current_exts = dict(lab.individual_extensions or {})
+    processed_usernames = []
+
+    for req_item in requests_to_process:
+        req_item.status = payload.status
+        req_item.response_note = payload.response_note
+        req_item.responded_at = now
+
+        if payload.status == "approved":
+            req_item.granted_deadline = new_deadline
+            if req_item.student and req_item.student.username:
+                current_exts[req_item.student.username] = new_deadline.isoformat()
+                processed_usernames.append(req_item.student.username)
+        else:
+            req_item.granted_deadline = None
+            if req_item.student and req_item.student.username:
+                processed_usernames.append(req_item.student.username)
+
+    if payload.status == "approved":
+        lab.individual_extensions = current_exts
+
+    db.commit()
+
+    log = AuditLog(
+        user_id=current_user.id,
+        action=f"extension_request_batch_{payload.status}",
+        target=f"Batch {payload.status} {len(requests_to_process)} extension requests for Lab {lab.id} (Students: {', '.join(processed_usernames[:10])})",
+        ip_address=get_client_ip(request)
+    )
+    db.add(log)
+    db.commit()
+
+    return {
+        "success": True,
+        "processed_count": len(requests_to_process),
+        "status": payload.status,
+        "message": f"Successfully {'approved' if payload.status == 'approved' else 'rejected'} {len(requests_to_process)} extension requests."
+    }
+
 # --- PROXMOX & GUACAMOLE VM ENDPOINTS ---
 
 @router.get("/templates/proxmox", response_model=List[Dict[str, Any]])
@@ -841,23 +1066,32 @@ def submit_exam_from_vm(
 
     # Tính phạt muộn nếu quá hạn
     effective_deadline = lab.deadline
+    if effective_deadline and effective_deadline.tzinfo is not None:
+        effective_deadline = effective_deadline.replace(tzinfo=None)
+
     individual_deadline_str = (lab.individual_extensions or {}).get(current_user.username)
     if individual_deadline_str:
         try:
-            effective_deadline = datetime.fromisoformat(individual_deadline_str)
+            cleaned_str = str(individual_deadline_str).strip()
+            if cleaned_str.endswith("Z") or "+00:00" in cleaned_str:
+                iso_clean = cleaned_str.replace("Z", "+00:00")
+                parsed_dt = datetime.fromisoformat(iso_clean)
+                vn_dt = parsed_dt + timedelta(hours=7)
+                effective_deadline = vn_dt.replace(tzinfo=None)
+            else:
+                parsed_dt = datetime.fromisoformat(cleaned_str)
+                if parsed_dt.tzinfo is not None:
+                    effective_deadline = parsed_dt.astimezone().replace(tzinfo=None)
+                else:
+                    effective_deadline = parsed_dt
         except Exception:
             pass
 
     if now > effective_deadline:
-        policy = lab.late_policy or {}
-        allow_late = policy.get("allow_late", True)
-        if not allow_late:
-            raise HTTPException(status_code=400, detail="This lab deadline has passed and does not accept late submissions")
-        penalty_per_hour = policy.get("penalty_per_hour_percent", 0.0)
-        max_penalty = policy.get("max_penalty_percent", 0.0)
-        hours_late = (now - effective_deadline).total_seconds() / 3600.0
-        calculated_penalty = min(hours_late * penalty_per_hour, max_penalty)
-        submission.late_penalty = calculated_penalty
+        raise HTTPException(
+            status_code=400,
+            detail="Bài lab/bài thi đã hết hạn nộp! Vui lòng gửi yêu cầu gia hạn tới giảng viên để được phép nộp bài."
+        )
 
     db.commit()
     db.refresh(submission)
