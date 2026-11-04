@@ -96,6 +96,7 @@ class Settings:
 
         # Proxmox VE
         self.PVE_API_HOST = _required_env("PVE_API_HOST")
+        self.PVE_API_PORT = _required_int("PVE_API_PORT", minimum=1)
         self.PVE_API_USER = _required_env("PVE_API_USER")
         self.PVE_TOKEN_NAME = _required_env("PVE_TOKEN_NAME")
         self.PVE_TOKEN_VALUE = _required_env("PVE_TOKEN_VALUE")

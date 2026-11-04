@@ -27,6 +27,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: malsec-backend:1.0.0
     container_name: malsec-backend
     restart: always
     command:
@@ -36,6 +37,8 @@ services:
       - "${BACKEND_PORT:?BACKEND_PORT is required}"
     ports:
       - "127.0.0.1:${BACKEND_HOST_PORT:?BACKEND_HOST_PORT is required}:${BACKEND_PORT:?BACKEND_PORT is required}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       TZ: "Asia/Ho_Chi_Minh"
       DATABASE_URL: "postgresql+psycopg2://${DB_USER:?DB_USER is required}:${DB_PASSWORD:?DB_PASSWORD is required}@db:5432/${DB_NAME:?DB_NAME is required}"
@@ -53,6 +56,7 @@ services:
       ALLOWED_EXTENSIONS: "${ALLOWED_EXTENSIONS:?ALLOWED_EXTENSIONS is required}"
       MALWARE_ZIP_PASSWORD: "${MALWARE_ZIP_PASSWORD:?MALWARE_ZIP_PASSWORD is required}"
       PVE_API_HOST: "${PVE_API_HOST:?PVE_API_HOST is required}"
+      PVE_API_PORT: "${PVE_API_PORT:?PVE_API_PORT is required}"
       PVE_API_USER: "${PVE_API_USER:?PVE_API_USER is required}"
       PVE_TOKEN_NAME: "${PVE_TOKEN_NAME:?PVE_TOKEN_NAME is required}"
       PVE_TOKEN_VALUE: "${PVE_TOKEN_VALUE:?PVE_TOKEN_VALUE is required}"
@@ -104,6 +108,7 @@ services:
         VITE_DEV_PORT: "${VITE_DEV_PORT:?VITE_DEV_PORT is required}"
         VITE_API_PROXY_TARGET: "${VITE_API_PROXY_TARGET:?VITE_API_PROXY_TARGET is required}"
         VITE_API_PROXY_SECURE: "${VITE_API_PROXY_SECURE:?VITE_API_PROXY_SECURE is required}"
+    image: malsec-frontend:1.0.0
     container_name: malsec-frontend
     restart: always
     environment:
@@ -125,6 +130,26 @@ services:
     depends_on:
       backend:
         condition: service_started
+    networks:
+      - malsec-network
+
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: malsec-guacd
+    restart: always
+    networks:
+      - malsec-network
+
+  guacamole:
+    image: guacamole/guacamole:1.5.5
+    container_name: malsec-guacamole
+    restart: always
+    environment:
+      GUACD_HOSTNAME: guacd
+      GUACD_PORT: 4822
+      JSON_SECRET_KEY: "${GUAC_JSON_SECRET:?GUAC_JSON_SECRET is required}"
+    links:
+      - guacd
     networks:
       - malsec-network
 

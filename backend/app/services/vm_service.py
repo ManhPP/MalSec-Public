@@ -29,14 +29,18 @@ def get_pve_client():
     """Khởi tạo kết nối Proxmox API qua thư viện proxmoxer"""
     try:
         from proxmoxer import ProxmoxAPI
-        return ProxmoxAPI(
+        client = ProxmoxAPI(
             settings.PVE_API_HOST,
+            port=settings.PVE_API_PORT,
             user=settings.PVE_API_USER,
             token_name=settings.PVE_TOKEN_NAME,
             token_value=settings.PVE_TOKEN_VALUE,
-            verify_ssl=settings.PVE_VERIFY_SSL,
-            timeout=60
+            verify_ssl=False,
+            timeout=60,
         )
+        # proxmoxer hardcode https, chỉ cần đổi tiền tố sang http là chạy được với Gateway
+        client._store["base_url"] = client._store["base_url"].replace("https://", "http://", 1)
+        return client
     except Exception as e:
         print(f"[!] Warning: Could not initialize ProxmoxAPI client: {e}")
     return None
@@ -386,6 +390,13 @@ def provision_student_vm(
                         )
                     else:
                         raise
+
+                vms = proxmox.cluster.resources.get(type="vm")
+                cloned_vm = next((item for item in vms if int(item.get("vmid", -1)) == new_vmid), None)
+                if not cloned_vm:
+                    raise VMProvisionError(f"Cloned VM {new_vmid} does not exist")
+                node = cloned_vm["node"]
+
                 clone_duration = time.perf_counter() - clone_start
                 logger.info(f"[VM_ORCHESTRATION] CLONE_COMPLETE | User: {student_username} | Template: {template_vmid} -> VMID: {new_vmid} | Mode: {clone_type_str} | Duration: {clone_duration:.1f}s")
 
@@ -403,6 +414,9 @@ def provision_student_vm(
                 proxmox.nodes(node).qemu(new_vmid).config.post(**post_config)
             else:
                 # Nếu VM đã tồn tại, kiểm tra và đảm bảo mount đúng ISO của bài lab nếu được chỉ định
+                # Nếu VM đã tồn tại, lấy đúng node của VM
+                if existing_vm.get("node"):
+                    node = existing_vm["node"]
                 if iso_filename:
                     try:
                         current_cfg = proxmox.nodes(node).qemu(new_vmid).config.get()
