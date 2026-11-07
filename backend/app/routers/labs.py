@@ -861,6 +861,7 @@ def get_or_create_vm_session(
 @router.post("/{lab_id}/vm-rollback")
 def rollback_vm_session(
     lab_id: int,
+    lab_vm_id: int = Query(..., gt=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_user)
 ):
@@ -868,12 +869,15 @@ def rollback_vm_session(
     lab = db.query(Lab).filter(Lab.id == lab_id).first()
     if not lab:
         raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
-        
+    if not any(configuration.id == lab_vm_id for configuration in lab.vms):
+        raise HTTPException(status_code=404, detail="Cấu hình máy không thuộc bài lab")
+
     from app.services.vm_service import VMProvisionError, rollback_student_vm
     try:
         success = rollback_student_vm(
             student_username=current_user.username,
             lab_id=lab.id,
+            lab_vm_id=lab_vm_id,
             is_exam_mode=getattr(lab, 'is_exam_mode', False),
         )
     except VMProvisionError as exc:

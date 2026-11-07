@@ -664,53 +664,54 @@ def generate_guacamole_auth_json_url(
     logger.info(f"[VDI] SESSION_ISSUED | User: {student_username} | Target: {ip_address}:{port} ({protocol.upper()}) | TTL: {settings.GUAC_SESSION_TTL_SECONDS}s")
     return url
 
-def rollback_student_vm(student_username: str, lab_id: int, is_exam_mode: bool = False) -> bool:
-    """Back up/stop each student VM as before, then delete its entire gateway group."""
+def rollback_student_vm(student_username: str, lab_id: int, lab_vm_id: int, is_exam_mode: bool = False) -> bool:
+    """Tắt và xoá các bản VM của đúng cấu hình lab_vm_id; giữ group và máy khác."""
     proxmox = get_pve_client()
     if not proxmox:
         raise VMProvisionError("Cannot connect to the Proxmox API")
+
     try:
-        group = _find_student_group(student_username, lab_id)
-        if group is None:
-            return True
         resources = proxmox.cluster.resources.get(type="vm")
         matching_vms = _find_all_student_vms(resources, student_username, lab_id)
-        detail = proxmox.cluster.qemu.groups(group["id"]).get()
-        owned = {int(vm["vmid"]) for vm in matching_vms}
-        for member in detail.get("members", []):
-            target_vmid = int(member["vmid"])
-            if (target_vmid not in owned or not
-                    settings.STUDENT_VMID_MIN <= target_vmid <= settings.STUDENT_VMID_MAX):
-                logger.error(f"[SECURITY_ALERT] Target VMID {target_vmid} is outside student ownership/boundary. "
-                             "Group deletion skipped.")
-                raise VMProvisionError(f"Group contains an unauthorized VMID: {target_vmid}")
+        expected_name = _student_vm_name(student_username, lab_id, lab_vm_id)
+        matching_vms = [vm for vm in matching_vms if vm.get("name") == expected_name]
+        if not matching_vms:
+            return True
+
         for vm in matching_vms:
-            target_vmid, node = int(vm["vmid"]), vm["node"]
-            # Only process members that will be deleted by this recursive request.
-            if target_vmid not in {int(member["vmid"]) for member in detail.get("members", [])}:
+            target_vmid = int(vm["vmid"])
+            # Security guard: never operate outside student VMID boundary
+            if not (settings.STUDENT_VMID_MIN <= target_vmid <= settings.STUDENT_VMID_MAX):
+                logger.error(
+                    f"[SECURITY_ALERT] Target VMID {target_vmid} ({vm.get('name')}) is OUTSIDE "
+                    f"student boundary [{settings.STUDENT_VMID_MIN}, {settings.STUDENT_VMID_MAX}]. Skipped."
+                )
                 continue
-            status = proxmox.nodes(node).qemu(target_vmid).status.current.get()
-            if status.get("status") == "running":
-                if is_exam_mode:
-                    try:
-                        lab_vm_id = int(re.match(r"^lab-\d+-vm-(\d+)-", vm["name"])[1])
-                        backup_vm_workspace(target_vmid, student_username, lab_id, lab_vm_id)
-                        logger.info(f"[EXAM_WORKSPACE] Auto-backed up workspace for {student_username} "
-                                    f"before rollback on VM {target_vmid}")
-                    except Exception as ws_err:
-                        logger.warning(f"[EXAM_WORKSPACE] Auto-backup failed before rollback on VM {target_vmid}: {ws_err}")
-                print(f"[+] Stopping VM {target_vmid} for rollback...", flush=True)
-                stop_upid = proxmox.nodes(node).qemu(target_vmid).status.stop.post()
-                try:
+
+            try:
+                node = vm["node"]
+                status = proxmox.nodes(node).qemu(target_vmid).status.current.get()
+                if status.get("status") == "running":
+                    # Tự động sao lưu Exam_Workspace trước khi xóa máy ảo để không mất bài làm (nếu là bài thi)
+                    if is_exam_mode:
+                        try:
+                            backup_vm_workspace(target_vmid, student_username, lab_id, lab_vm_id)
+                            logger.info(f"[EXAM_WORKSPACE] Auto-backed up workspace for {student_username} before rollback on VM {target_vmid}")
+                        except Exception as ws_err:
+                            logger.warning(f"[EXAM_WORKSPACE] Auto-backup failed before rollback on VM {target_vmid}: {ws_err}")
+
+                    print(f"[+] Stopping VM {target_vmid} for rollback...", flush=True)
+                    stop_upid = proxmox.nodes(node).qemu(target_vmid).status.stop.post()
                     _wait_for_pve_task(proxmox, node, stop_upid, f"stopping VM {target_vmid}")
-                except Exception as single_err:
-                    logger.warning(f"Could not stop VM {target_vmid} during rollback: {single_err}")
-                    raise
-        _delete_student_group(group)
-        for member in detail.get("members", []):
-            target_vmid = int(member["vmid"])
-            logger.info(f"[VM_ORCHESTRATION] ROLLBACK | User: {student_username} | LabID: {lab_id} | Purged VMID: {target_vmid}")
-            print(f"[+] VM {target_vmid} purged successfully from Proxmox!", flush=True)
+
+                print(f"[+] Destroying VM {target_vmid} for rollback...", flush=True)
+                destroy_upid = proxmox.nodes(node).qemu(target_vmid).delete(purge=1)
+                _wait_for_pve_task(proxmox, node, destroy_upid, f"destroying VM {target_vmid}")
+                logger.info(f"[VM_ORCHESTRATION] ROLLBACK | User: {student_username} | LabID: {lab_id} | Purged VMID: {target_vmid}")
+                print(f"[+] VM {target_vmid} purged successfully from Proxmox!", flush=True)
+            except Exception as single_err:
+                logger.warning(f"Could not purge VM {target_vmid} during rollback: {single_err}")
+
         return True
     except VMProvisionError:
         raise
