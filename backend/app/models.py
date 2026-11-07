@@ -84,31 +84,12 @@ class Lab(Base):
     
     is_active = Column(Boolean, default=True)
     enable_vm = Column(Boolean, default=True, server_default='true', nullable=False)
-    template_vmid = Column(
-        Integer, default=lambda: settings.DEFAULT_TEMPLATE_VMID, nullable=False
-    )
-    is_linked_clone = Column(Boolean, default=True, server_default='true', nullable=False)
-    vm_protocol = Column(
-        String, default=lambda: settings.DEFAULT_VM_PROTOCOL, nullable=False
-    )
-    vm_port = Column(Integer, default=lambda: settings.DEFAULT_VM_PORT, nullable=False)
-    vm_username = Column(String, nullable=True)
-    vm_password = Column(String, nullable=True)
-    # VM Drive D: Content Configuration
-    # vm_drive_mode: 'default' (uses tools-1001.iso) or 'custom' (uses lab-{id}.iso)
-    vm_drive_mode = Column(String, default='default', server_default='default', nullable=False)
-    # vm_drive_files: list of selected filenames or metadata e.g. ['static.zip', 'malware1.exe']
-    vm_drive_files = Column(JSONB, nullable=False, server_default='[]')
     # VM Clipboard Isolation: Chặn copy từ trong máy ảo ra ngoài máy thật
     disable_vm_copy = Column(Boolean, default=False, server_default='false', nullable=False)
     # Chặn dán từ máy thật vào trong máy ảo
     disable_vm_paste = Column(Boolean, default=False, server_default='false', nullable=False)
     # Chế độ kiểm tra / thi (Exam Mode)
     is_exam_mode = Column(Boolean, default=False, server_default='false', nullable=False)
-    # Tùy chỉnh phần cứng VM (Cores, RAM MB)
-    cpu_cores = Column(Integer, nullable=True)
-    ram_mb = Column(Integer, nullable=True)
-
     class_id = Column(Integer, ForeignKey('classes.id', ondelete='CASCADE'), nullable=False)
 
     created_by_id = Column(Integer, ForeignKey('users.id'), nullable=False)
@@ -119,6 +100,26 @@ class Lab(Base):
     created_by = relationship('User')
     submissions = relationship('Submission', back_populates='lab', cascade='all, delete-orphan')
     extension_requests = relationship('ExtensionRequest', back_populates='lab', cascade='all, delete-orphan')
+
+class LabVM(Base):
+    """Stable machine definition used in student VM naming and per-machine settings."""
+    __tablename__ = 'lab_vms'
+
+    id = Column(Integer, primary_key=True)
+    lab_id = Column(Integer, ForeignKey('labs.id'), nullable=False, index=True)
+    template_vmid = Column(Integer, nullable=False)
+    is_linked_clone = Column(Boolean, nullable=False, default=True, server_default='true')
+    cpu_cores = Column(Integer, nullable=True)
+    ram_mb = Column(Integer, nullable=True)
+    vm_protocol = Column(String, nullable=True)
+    vm_port = Column(Integer, nullable=True)
+    vm_username = Column(String, nullable=True)
+    vm_password = Column(String, nullable=True)
+    vm_drive_mode = Column(String, nullable=False, default='default', server_default='default')
+    vm_drive_files = Column(JSONB, nullable=False, server_default='[]')
+
+    lab = relationship('Lab', backref='vms')
+
 
 class Submission(Base):
     __tablename__ = 'submissions'

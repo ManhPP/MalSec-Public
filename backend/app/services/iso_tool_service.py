@@ -209,19 +209,19 @@ class IsoToolService:
             IsoToolService.rebuild_iso()
 
     @staticmethod
-    def get_lab_iso_basename(lab_id: int) -> str:
-        """Trả về tên file ISO riêng của bài Lab"""
-        return f"lab-{lab_id}.iso"
+    def get_lab_iso_basename(lab_id: int, lab_vm_id: int) -> str:
+        """Trả về tên ISO riêng của một cấu hình máy trong bài lab."""
+        return f"lab-{lab_id}-vm-{lab_vm_id}.iso"
 
     @staticmethod
-    def build_lab_iso(lab_id: int, selected_files: List[str]) -> str:
+    def build_lab_iso(lab_id: int, lab_vm_id: int, selected_files: List[str]) -> str:
         """
-        Tạo file ISO riêng cho bài lab lab-{lab_id}.iso chứa các file được chỉ định.
+        Tạo ISO riêng lab-{lab_id}-vm-{lab_vm_id}.iso chứa các file được chỉ định.
         Mỗi file có thể là file trong kho chung (filename) hoặc có prefix (rel_path như 'lecturers/user/filename').
         Sử dụng symlinks tạm trên Proxmox để tiết kiệm dung lượng.
         """
-        lab_iso_dir = f"/var/lib/vz/template/iso/labs/lab-{lab_id}"
-        iso_basename = IsoToolService.get_lab_iso_basename(lab_id)
+        lab_iso_dir = f"/var/lib/vz/template/iso/labs/lab-{lab_id}-vm-{lab_vm_id}"
+        iso_basename = IsoToolService.get_lab_iso_basename(lab_id, lab_vm_id)
         lab_iso_path = f"/var/lib/vz/template/iso/{iso_basename}"
         
         # Lọc danh sách an toàn
@@ -252,16 +252,19 @@ class IsoToolService:
         return lab_iso_path
 
     @staticmethod
-    def sync_to_running_vms(lab_id: int | None = None, iso_name: str | None = None) -> Dict[str, Any]:
+    def sync_to_running_vms(lab_id: int | None = None, iso_name: str | None = None,
+                            *, lab_vm_id: int | None = None) -> Dict[str, Any]:
         """
         Remount ổ đĩa ide2 cho các máy ảo sinh viên đang chạy để nhận ngay file mới.
-        Nếu truyền lab_id, chỉ remount cho máy ảo thuộc bài lab đó với ISO chỉ định.
+        Nếu lọc một cấu hình, cần cả lab_id và lab_vm_id. Không truyền bộ lọc
+        thì giữ hành vi sync ISO chung của API quản trị hiện tại.
         """
+        if (lab_id is None) != (lab_vm_id is None):
+            raise ValueError("A machine-specific ISO sync requires lab_id and lab_vm_id")
         proxmox = get_pve_client()
         if not proxmox:
             raise RuntimeError("Cannot connect to Proxmox API")
 
-        node = settings.PVE_NODE
         resources = proxmox.cluster.resources.get(type="vm")
         synced_count = 0
         target_iso = iso_name or os.path.basename(PVE_ISO_PATH)
@@ -273,9 +276,10 @@ class IsoToolService:
             # Chỉ áp dụng cho máy ảo sinh viên trong dải STUDENT_VMID
             if settings.STUDENT_VMID_MIN <= vmid <= settings.STUDENT_VMID_MAX and status == "running":
                 # Nếu lọc theo lab_id
-                if lab_id is not None and not name.startswith(f"lab-{lab_id}-"):
+                if lab_id is not None and not name.startswith(f"lab-{lab_id}-vm-{lab_vm_id}-"):
                     continue
                 try:
+                    node = vm["node"]
                     # Remount ide2
                     proxmox.nodes(node).qemu(vmid).config.post(
                         ide2=f"local:iso/{target_iso},media=cdrom"

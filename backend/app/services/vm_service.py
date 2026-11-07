@@ -10,22 +10,38 @@ import secrets
 import re
 import threading
 from collections import defaultdict
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, List, Optional, TypedDict, TYPE_CHECKING
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from app.config import settings
 from app.logging_config import logger
+
+if TYPE_CHECKING:
+    from proxmoxer import ProxmoxAPI
+
+
+class VMConfiguration(TypedDict):
+    """The old per-VM provision arguments, identified by a saved lab_vms record."""
+    lab_vm_id: int
+    template_vmid: int
+    protocol: str
+    port: int
+    is_linked_clone: bool
+    iso_filename: str | None
+    cpu_cores: int | None
+    ram_mb: int | None
 
 _provision_locks = defaultdict(threading.Lock)
 _provision_global_lock = threading.Lock()
 
 
 def _get_provision_lock(student_username: str, lab_id: int) -> threading.Lock:
+    """Serialize provisioning of the whole student's lab, including one-machine groups."""
     with _provision_global_lock:
         return _provision_locks[(student_username, lab_id)]
 
 
-def get_pve_client():
+def get_pve_client() -> Optional['ProxmoxAPI']:
     """Khởi tạo kết nối Proxmox API qua thư viện proxmoxer"""
     try:
         from proxmoxer import ProxmoxAPI
@@ -50,9 +66,8 @@ class VMProvisionError(RuntimeError):
     """Raised when Proxmox creates no usable student VM."""
 
 
-def _student_vm_name(student_username: str, lab_id: int) -> str:
-    """Build a stable Proxmox-safe name used as the VM ownership key."""
-    prefix = f"lab-{lab_id}-"
+def _student_resource_name(student_username: str, prefix: str) -> str:
+    """Apply the existing username normalization/hash rules to a group or VM prefix."""
     normalized = re.sub(r"[^A-Za-z0-9-]", "-", student_username).strip("-")
     normalized = normalized or "student"
     plain_name = f"{prefix}{normalized}"
@@ -64,29 +79,45 @@ def _student_vm_name(student_username: str, lab_id: int) -> str:
     return f"{prefix}{normalized[:max_username_length]}-{digest}"
 
 
-def _preferred_student_vmid(student_username: str, lab_id: int) -> int:
+def _student_group_name(student_username: str, lab_id: int) -> str:
+    """Name the student's lab environment: lab-{lab_id}-{username}."""
+    return _student_resource_name(student_username, f"lab-{lab_id}-")
+
+
+def _student_vm_name(student_username: str, lab_id: int, lab_vm_id: int) -> str:
+    """Name one saved configuration: lab-{lab_id}-vm-{lab_vm_id}-{username}."""
+    return _student_resource_name(student_username, f"lab-{lab_id}-vm-{lab_vm_id}-")
+
+
+def _preferred_student_vmid(student_username: str, lab_id: int, lab_vm_id: int) -> int:
     """Return a stable VMID candidate without relying on digits in a username."""
     vmid_min = settings.STUDENT_VMID_MIN
     vmid_max = settings.STUDENT_VMID_MAX
     if vmid_min > vmid_max:
         raise VMProvisionError("Invalid student VMID range configuration")
-    digest = hashlib.sha256(f"{student_username}\0{lab_id}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{student_username}\0{lab_id}\0{lab_vm_id}".encode("utf-8")).digest()
     return vmid_min + int.from_bytes(digest[:8], "big") % (vmid_max - vmid_min + 1)
 
 
-def _find_all_student_vms(resources, student_username: str, lab_id: int) -> List[Dict[str, Any]]:
+def _find_all_student_vms(resources: List[Dict[str, Any]], student_username: str, lab_id: int) -> List[Dict[str, Any]]:
     """Find all VMs whose name proves they belong to this student and lab."""
-    expected_name = _student_vm_name(student_username, lab_id)
-    return [item for item in resources if item.get("name") == expected_name]
+    matches = []
+    for item in resources:
+        match = re.match(rf"^lab-{lab_id}-vm-(\d+)-", item.get("name") or "")
+        if match and item["name"] == _student_vm_name(student_username, lab_id, int(match[1])):
+            matches.append(item)
+    return matches
 
 
-def _find_student_vm(resources, student_username: str, lab_id: int):
+def _find_student_vm(resources: List[Dict[str, Any]], student_username: str, lab_id: int,
+                     lab_vm_id: int) -> Optional[Dict[str, Any]]:
     """Find the primary VM belonging to this student and lab without failing if duplicates exist."""
     matches = _find_all_student_vms(resources, student_username, lab_id)
+    expected_name = _student_vm_name(student_username, lab_id, lab_vm_id)
+    matches = [item for item in matches if item.get("name") == expected_name]
     if not matches:
         return None
     if len(matches) > 1:
-        expected_name = _student_vm_name(student_username, lab_id)
         logger.warning(
             f"[VM_ORCHESTRATION] Multiple Proxmox VMs found with ownership name '{expected_name}': "
             f"{[m.get('vmid') for m in matches]}. Prioritizing running/first VM."
@@ -98,23 +129,24 @@ def _find_student_vm(resources, student_username: str, lab_id: int):
 
 
 def _is_vm_owned_by_student(vm_name: str, student_username: str) -> bool:
-    """Check whether a VM name belongs to this student (e.g. lab-<id>-<username>)."""
+    """Check ownership of lab-{lab_id}-vm-{lab_vm_id}-{username}, including hashed names."""
     if not vm_name:
         return False
     normalized = re.sub(r"[^A-Za-z0-9-]", "-", student_username).strip("-") or "student"
     digest = hashlib.sha256(student_username.encode("utf-8")).hexdigest()[:8]
-    # Name pattern: lab-{lab_id}-{normalized} or lab-{lab_id}-{normalized_truncated}-{digest}
-    if re.match(rf"^lab-\d+-{re.escape(normalized)}$", vm_name):
+    # Keep the old direct-name/hash checks; only the structural prefix changes.
+    if re.match(rf"^lab-\d+-vm-\d+-{re.escape(normalized)}$", vm_name):
         return True
-    if re.match(rf"^lab-\d+-.*-{re.escape(digest)}$", vm_name):
+    if re.match(rf"^lab-\d+-vm-\d+-.*-{re.escape(digest)}$", vm_name):
         return True
     return False
 
 
-def _stop_other_running_student_vms(proxmox, node: str, resources, student_username: str, current_vmid: int):
+def _stop_other_running_student_vms(proxmox: 'ProxmoxAPI', resources: List[Dict[str, Any]], student_username: str,
+                                   current_vmids: List[int]) -> None:
     """
-    Giới hạn tài nguyên: Mỗi sinh viên chỉ được phép có tối đa 1 máy ảo ở trạng thái RUNNING.
-    Tự động tắt các máy ảo ở bài lab khác của sinh viên này trước khi bật máy ảo mới.
+    Giới hạn tài nguyên: Mỗi sinh viên chỉ chạy một group/bài lab tại một thời điểm.
+    Tắt VM của bài lab khác, không tắt các VM thuộc current_vmids.
     """
     for res in resources:
         try:
@@ -124,31 +156,33 @@ def _stop_other_running_student_vms(proxmox, node: str, resources, student_usern
             # Chỉ xét trong dải VMID sinh viên và khác VM hiện tại
             if (
                 settings.STUDENT_VMID_MIN <= vmid <= settings.STUDENT_VMID_MAX
-                and vmid != current_vmid
+                and vmid not in current_vmids
                 and status == "running"
                 and _is_vm_owned_by_student(name, student_username)
             ):
                 logger.info(
                     f"[RESOURCE_QUOTA] Auto-stopping other running VM {vmid} ({name}) "
-                    f"for student {student_username} to enforce 1-VM-per-student limit"
+                    f"for student {student_username} to enforce 1-lab-per-student limit; current VMIDs: {current_vmids}"
                 )
                 print(
                     f"[+] [RESOURCE_QUOTA] Auto-stopping previous running VM {vmid} ({name}) "
                     f"for student {student_username}...",
                     flush=True
                 )
-                stop_upid = proxmox.nodes(node).qemu(vmid).status.stop.post()
-                _wait_for_pve_task(proxmox, node, stop_upid, f"auto-stopping VM {vmid}")
+                target_node = res.get("node")
+                stop_upid = proxmox.nodes(target_node).qemu(vmid).status.stop.post()
+                _wait_for_pve_task(proxmox, target_node, stop_upid, f"auto-stopping VM {vmid}")
         except Exception as exc:
             logger.warning(f"Could not auto-stop previous VM {res.get('vmid')} for {student_username}: {exc}")
 
 
-def _allocate_student_vmid(resources, student_username: str, lab_id: int) -> int:
+def _allocate_student_vmid(resources: List[Dict[str, Any]], student_username: str,
+                           lab_id: int, lab_vm_id: int) -> int:
     """Resolve hash collisions by walking the configured student VMID range."""
     vmid_min = settings.STUDENT_VMID_MIN
     vmid_max = settings.STUDENT_VMID_MAX
     used_vmids = {int(item.get("vmid", -1)) for item in resources}
-    preferred = _preferred_student_vmid(student_username, lab_id)
+    preferred = _preferred_student_vmid(student_username, lab_id, lab_vm_id)
     range_size = vmid_max - vmid_min + 1
     for offset in range(range_size):
         candidate = vmid_min + ((preferred - vmid_min + offset) % range_size)
@@ -157,7 +191,7 @@ def _allocate_student_vmid(resources, student_username: str, lab_id: int) -> int
     raise VMProvisionError("No free student VMID is available")
 
 
-def _wait_for_pve_task(proxmox, node: str, upid: str, action: str) -> None:
+def _wait_for_pve_task(proxmox: 'ProxmoxAPI', node: str, upid: str, action: str) -> None:
     """Wait for an asynchronous Proxmox task and surface its exit status."""
     if not upid or not isinstance(upid, str):
         raise VMProvisionError(f"Proxmox did not return a task id for {action}")
@@ -183,7 +217,7 @@ def _wait_for_pve_task(proxmox, node: str, upid: str, action: str) -> None:
     )
 
 
-def _get_guest_vlan_ip(proxmox, node: str, vmid: int) -> str | None:
+def _get_guest_vlan_ip(proxmox: 'ProxmoxAPI', node: str, vmid: int) -> str | None:
     """Return a VLAN 30 IPv4 address when QEMU Guest Agent is available."""
     try:
         interfaces = (
@@ -211,7 +245,7 @@ def _get_guest_vlan_ip(proxmox, node: str, vmid: int) -> str | None:
     return None
 
 
-def _wait_for_guest_vlan_ip(proxmox, node: str, vmid: int) -> str:
+def _wait_for_guest_vlan_ip(proxmox: 'ProxmoxAPI', node: str, vmid: int) -> str:
     """Wait for QEMU Guest Agent to report the VM's unique VLAN 30 address."""
     deadline = time.monotonic() + settings.VM_AGENT_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -235,7 +269,7 @@ def _net0_with_unique_mac(source_net0: str) -> str:
     return ",".join(parts)
 
 
-def _ensure_fakenet_rdp_whitelist(proxmox, node: str, vmid: int) -> None:
+def _ensure_fakenet_rdp_whitelist(proxmox: 'ProxmoxAPI', node: str, vmid: int) -> None:
     """
     Tự động chuẩn hóa file cấu hình FakeNet-NG (default.ini) trên VM Windows:
     - Loại trừ port 3389, 22, 139 (BlackListPortsTCP)
@@ -297,127 +331,154 @@ def _wait_for_connection(
     )
 
 
-def provision_student_vm(
-    student_username: str,
-    lab_id: int,
-    template_vmid: int,
-    protocol: str,
-    port: int,
-    is_linked_clone: bool = True,
-    iso_filename: str | None = None,
-    cpu_cores: int | None = None,
-    ram_mb: int | None = None,
-    is_exam_mode: bool = False,
-) -> Tuple[str, int]:
-    """
-    1. Kiểm tra xem sinh viên đã có máy ảo cho bài lab này chưa.
-    2. Nếu chưa có, clone từ template (Linked Clone hoặc Full Clone tùy cấu hình lab).
-    3. Gán MAC riêng và cấu hình RAM/CPU nếu có.
-    4. Bật máy ảo và phục hồi Exam Workspace (nếu có bản backup).
-    """
-    node = settings.PVE_NODE
+def _find_student_group(student_username: str, lab_id: int) -> Optional[Dict[str, Any]]:
+    """Find a student's existing gateway group by its stable ownership name."""
     proxmox = get_pve_client()
     if not proxmox:
         raise VMProvisionError("Cannot connect to the Proxmox API")
-    new_vmid = _preferred_student_vmid(student_username, lab_id)
+    expected = _student_group_name(student_username, lab_id)
+    return next((group for group in proxmox.cluster.qemu.groups.get()
+                 if group.get("name") == expected), None)
 
-    # Acquire lock for this specific student and lab to prevent concurrent duplicate clones
+
+def _delete_student_group(group: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Validate all members before recursive deletion; wait for gateway cleanup."""
+    proxmox = get_pve_client()
+    if not proxmox:
+        raise VMProvisionError("Cannot connect to the Proxmox API")
+    detail = proxmox.cluster.qemu.groups(group["id"]).get()
+    members = detail.get("members", [])
+    resources = proxmox.cluster.resources.get(type="vm")
+    lab_match = re.match(r"^lab-(\d+)-", group["name"])
+    if not lab_match:
+        raise VMProvisionError("Group does not use the Malsec ownership convention")
+    for member in members:
+        vmid = int(member["vmid"])
+        resource = next((vm for vm in resources if int(vm.get("vmid", -1)) == vmid), None)
+        # A recursive request must never bypass a guard by deleting a skipped member.
+        if not settings.STUDENT_VMID_MIN <= vmid <= settings.STUDENT_VMID_MAX:
+            logger.warning(f"[SECURITY BLOCKED] Group deletion denied: VMID {vmid} outside student boundary")
+            raise VMProvisionError(f"Group contains VMID {vmid} outside student boundary")
+        if resource is None or not re.match(rf"^lab-{lab_match[1]}-vm-\d+-", resource.get("name", "")):
+            raise VMProvisionError(f"Group member {vmid} does not match its lab ownership")
+    task = proxmox.cluster.qemu.groups(group["id"]).delete(recursive=1)
+    _wait_for_pve_task(proxmox, "gateway", task, f"deleting group {group['name']}")
+    return members
+
+
+def provision_student_vm(
+    student_username: str,
+    lab_id: int,
+    vm_configs: List[VMConfiguration],
+    is_exam_mode: bool = False,
+) -> List[Tuple[str, int]]:
+    """
+    Reuse/create the student's group, then apply the old provision flow per VM.
+    Return (IP, VMID) pairs in configuration order, including one-machine groups.
+    """
+    proxmox = get_pve_client()
+    if not proxmox:
+        raise VMProvisionError("Cannot connect to the Proxmox API")
+    results: List[Tuple[str, int]] = []
+    new_vmid = None
     lock = _get_provision_lock(student_username, lab_id)
     with lock:
         try:
             resources = proxmox.cluster.resources.get(type="vm")
-            existing_vm = _find_student_vm(resources, student_username, lab_id)
-            new_vmid = (
-                int(existing_vm["vmid"])
-                if existing_vm
-                else _allocate_student_vmid(resources, student_username, lab_id)
-            )
-
-            if not existing_vm:
-                source = next(
-                    (item for item in resources if int(item.get("vmid", -1)) == template_vmid),
-                    None,
-                )
+            missing = []
+            allocation_resources = list(resources)
+            for config in vm_configs:
+                lab_vm_id = config["lab_vm_id"]
+                if _find_student_vm(resources, student_username, lab_id, lab_vm_id):
+                    continue
+                template_vmid = config["template_vmid"]
+                source = next((item for item in resources
+                               if int(item.get("vmid", -1)) == template_vmid), None)
                 if not source:
                     raise VMProvisionError(f"Source VM {template_vmid} does not exist")
                 if source.get("status") == "running":
-                    raise VMProvisionError(
-                        f"Source VM {template_vmid} is running; stop it before cloning"
-                    )
-
-                clone_type_str = "Linked Clone (full=0)" if is_linked_clone else "Full Clone (full=1)"
-                print(
-                    f"[+] Cloning source VM {template_vmid} ({clone_type_str}) to VM {new_vmid} "
-                    f"for {student_username}...",
-                    flush=True,
-                )
-                source_config = proxmox.nodes(node).qemu(template_vmid).config.get()
-                source_net0 = source_config.get("net0")
-                if not source_net0:
+                    raise VMProvisionError(f"Source VM {template_vmid} is running; stop it before cloning")
+                source_config = proxmox.nodes(source["node"]).qemu(template_vmid).config.get()
+                if not source_config.get("net0"):
                     raise VMProvisionError(f"Source VM {template_vmid} has no net0 adapter")
+                new_vmid = _allocate_student_vmid(allocation_resources, student_username, lab_id, lab_vm_id)
+                allocation_resources.append({"vmid": new_vmid})
+                missing.append((config, source["node"], new_vmid))
 
+            new_vmids = {vmid for _, _, vmid in missing}
+            if missing:
+                group = _find_student_group(student_username, lab_id)
+                if group is None:
+                    group = proxmox.cluster.qemu.groups.post(name=_student_group_name(student_username, lab_id))
+                payload = {
+                    "quantity": len(missing),
+                    "node": ",".join(node for _, node, _ in missing),
+                    "vmid": ",".join(str(config["template_vmid"]) for config, _, _ in missing),
+                    "newid": ",".join(str(vmid) for _, _, vmid in missing),
+                    "name": ",".join(_student_vm_name(student_username, lab_id, config["lab_vm_id"])
+                                     for config, _, _ in missing),
+                    "full": ",".join("0" if config["is_linked_clone"] else "1" for config, _, _ in missing),
+                    "target": ",".join("" for _ in missing),
+                }
                 clone_start = time.perf_counter()
+                print(f"[+] Cloning {len(missing)} VM(s) for {student_username} on Lab {lab_id}...", flush=True)
                 try:
-                    clone_upid = proxmox.nodes(node).qemu(template_vmid).clone.post(
-                        newid=new_vmid,
-                        name=_student_vm_name(student_username, lab_id),
-                        full=0 if is_linked_clone else 1,
-                    )
-                    _wait_for_pve_task(
-                        proxmox,
-                        node,
-                        clone_upid,
-                        f"cloning source VM {template_vmid} to VM {new_vmid}",
-                    )
+                    clone_upid = proxmox.cluster.qemu.groups(group["id"]).clone.post(**payload)
+                    _wait_for_pve_task(proxmox, "gateway", clone_upid, f"cloning group for Lab {lab_id}")
                 except Exception as clone_err:
                     err_msg = str(clone_err)
-                    if is_linked_clone and ("Linked clone feature is not supported" in err_msg or "efidisk" in err_msg):
-                        logger.warning(
-                            f"[VM_ORCHESTRATION] Linked clone unsupported for template {template_vmid} (efidisk/storage limitation). "
-                            f"Falling back to Full Clone (full=1)... Error: {err_msg}"
-                        )
-                        clone_type_str = "Full Clone (fallback full=1)"
-                        clone_upid = proxmox.nodes(node).qemu(template_vmid).clone.post(
-                            newid=new_vmid,
-                            name=_student_vm_name(student_username, lab_id),
-                            full=1,
-                        )
-                        _wait_for_pve_task(
-                            proxmox,
-                            node,
-                            clone_upid,
-                            f"cloning source VM {template_vmid} to VM {new_vmid} (fallback full clone)",
-                        )
-                    else:
+                    linked_error = "Linked clone feature is not supported" in err_msg or "efidisk" in err_msg
+                    if not linked_error or not any(config["is_linked_clone"] for config, _, _ in missing):
                         raise
+                    # Retry only a completed, failed task whose batch rollback is visible.
+                    # Transport failures/timeouts do not establish that submission failed.
+                    if "Proxmox task failed while" not in err_msg:
+                        raise
+                    detail = proxmox.cluster.qemu.groups(group["id"]).get()
+                    observed = proxmox.cluster.resources.get(type="vm")
+                    retained = {int(member["vmid"]) for member in detail.get("members", [])}
+                    if (detail.get("state") != "ready" or detail.get("active_task")
+                            or retained & new_vmids
+                            or any(int(vm.get("vmid", -1)) in new_vmids for vm in observed)):
+                        raise
+                    logger.warning(f"[VM_ORCHESTRATION] Linked clone unsupported; gateway rollback complete. "
+                                   f"Falling back to Full Clone (full=1)... Error: {err_msg}")
+                    payload["full"] = ",".join("1" for _ in missing)
+                    clone_upid = proxmox.cluster.qemu.groups(group["id"]).clone.post(**payload)
+                    _wait_for_pve_task(proxmox, "gateway", clone_upid,
+                                       f"cloning group for Lab {lab_id} (fallback full clone)")
+                logger.info(f"[VM_ORCHESTRATION] CLONE_COMPLETE | User: {student_username} | "
+                            f"LabID: {lab_id} | VMIDs: {sorted(new_vmids)} | "
+                            f"Duration: {time.perf_counter() - clone_start:.1f}s")
+                resources = proxmox.cluster.resources.get(type="vm")
 
-                vms = proxmox.cluster.resources.get(type="vm")
-                cloned_vm = next((item for item in vms if int(item.get("vmid", -1)) == new_vmid), None)
-                if not cloned_vm:
-                    raise VMProvisionError(f"Cloned VM {new_vmid} does not exist")
-                node = cloned_vm["node"]
+            current_vms = []
+            for config in vm_configs:
+                vm = _find_student_vm(resources, student_username, lab_id, config["lab_vm_id"])
+                if not vm:
+                    raise VMProvisionError(f"Cloned VM for configuration {config['lab_vm_id']} does not exist")
+                current_vms.append(vm)
+            _stop_other_running_student_vms(proxmox, resources, student_username,
+                                           [int(vm["vmid"]) for vm in current_vms])
 
-                clone_duration = time.perf_counter() - clone_start
-                logger.info(f"[VM_ORCHESTRATION] CLONE_COMPLETE | User: {student_username} | Template: {template_vmid} -> VMID: {new_vmid} | Mode: {clone_type_str} | Duration: {clone_duration:.1f}s")
-
-                post_config = {
-                    "net0": _net0_with_unique_mac(source_net0),
-                    "agent": "enabled=1",
-                }
-                if iso_filename:
-                    post_config["ide2"] = f"local:iso/{iso_filename},media=cdrom"
-                if cpu_cores and cpu_cores > 0:
-                    post_config["cores"] = cpu_cores
-                if ram_mb and ram_mb >= 512:
-                    post_config["memory"] = ram_mb
-
-                proxmox.nodes(node).qemu(new_vmid).config.post(**post_config)
-            else:
-                # Nếu VM đã tồn tại, kiểm tra và đảm bảo mount đúng ISO của bài lab nếu được chỉ định
-                # Nếu VM đã tồn tại, lấy đúng node của VM
-                if existing_vm.get("node"):
-                    node = existing_vm["node"]
-                if iso_filename:
+            for config, vm in zip(vm_configs, current_vms):
+                new_vmid, node = int(vm["vmid"]), vm["node"]
+                protocol, port = config["protocol"], config["port"]
+                iso_filename = config["iso_filename"]
+                cpu_cores, ram_mb = config["cpu_cores"], config["ram_mb"]
+                if new_vmid in new_vmids:
+                    # Use the clone's NIC, never the template's: preserve gateway firewall settings.
+                    cloned_config = proxmox.nodes(node).qemu(new_vmid).config.get()
+                    post_config = {"agent": "enabled=1",
+                                   "net0": _net0_with_unique_mac(cloned_config["net0"])}
+                    if iso_filename:
+                        post_config["ide2"] = f"local:iso/{iso_filename},media=cdrom"
+                    if cpu_cores and cpu_cores > 0:
+                        post_config["cores"] = cpu_cores
+                    if ram_mb and ram_mb >= 512:
+                        post_config["memory"] = ram_mb
+                    proxmox.nodes(node).qemu(new_vmid).config.post(**post_config)
+                elif iso_filename:
                     try:
                         current_cfg = proxmox.nodes(node).qemu(new_vmid).config.get()
                         expected_ide2 = f"local:iso/{iso_filename},media=cdrom"
@@ -426,67 +487,51 @@ def provision_student_vm(
                     except Exception as e:
                         logger.warning(f"[VM_ORCHESTRATION] Failed to update ide2 on existing VM {new_vmid}: {e}")
 
-            # 1-VM-per-student limit: Tự động tắt bất kỳ VM nào khác đang chạy của sinh viên này
-            _stop_other_running_student_vms(proxmox, node, resources, student_username, new_vmid)
-
-            status = proxmox.nodes(node).qemu(new_vmid).status.current.get()
-            boot_start = time.perf_counter()
-            is_already_running = (status.get("status") == "running")
-            if not is_already_running:
-                # Cập nhật RAM/Cores nếu có cấu hình tùy chỉnh
-                hw_updates = {}
-                if cpu_cores and cpu_cores > 0:
-                    hw_updates["cores"] = cpu_cores
-                if ram_mb and ram_mb >= 512:
-                    hw_updates["memory"] = ram_mb
-                if hw_updates:
-                    try:
-                        proxmox.nodes(node).qemu(new_vmid).config.post(**hw_updates)
-                    except Exception as hw_e:
-                        logger.warning(f"Could not apply hardware updates to VM {new_vmid}: {hw_e}")
-
-                print(f"[+] Starting VM {new_vmid}...", flush=True)
-                start_upid = proxmox.nodes(node).qemu(new_vmid).status.start.post()
-                _wait_for_pve_task(proxmox, node, start_upid, f"starting VM {new_vmid}")
-
-            # Lấy IP từ QEMU guest agent (nếu VM đang chạy sẵn, hàm này trả về ngay tức thì)
-            ip_address = _wait_for_guest_vlan_ip(proxmox, node, new_vmid)
-
-            # Chỉ áp dụng độ trễ boot và cấu hình whitelist nếu VM vừa mới được bật lên
-            if not is_already_running:
-                if settings.VM_VERIFY_CONNECTION:
-                    _wait_for_connection(ip_address, new_vmid, protocol, port)
-                else:
-                    print(
-                        f"[+] Waiting {settings.VM_BOOT_WAIT_SECONDS}s for guest VM "
-                        f"{new_vmid} to finish booting...",
-                        flush=True,
-                    )
-                    time.sleep(settings.VM_BOOT_WAIT_SECONDS)
-                # Tự động khởi tạo hoặc phục hồi Exam_Workspace cho sinh viên (Chỉ áp dụng khi bài lab bật chế độ kiểm tra Exam Mode)
-                if is_exam_mode:
-                    try:
-                        restore_vm_workspace(new_vmid, student_username, lab_id)
-                    except Exception as ws_err:
-                        logger.warning(f"[EXAM_WORKSPACE] Workspace restore skipped/failed on VM {new_vmid}: {ws_err}")
-
-            # Đảm bảo cấu hình FakeNet và RDP Transport luôn chuẩn xác kể cả warm hit lẫn cold boot
-            if protocol.lower() == "rdp" or port == 3389:
-                _ensure_fakenet_rdp_whitelist(proxmox, node, new_vmid)
-
-            boot_duration = time.perf_counter() - boot_start
-            logger.info(f"[VM_ORCHESTRATION] VM_ONLINE | User: {student_username} | VMID: {new_vmid} | IP: {ip_address} | {protocol.upper()}:{port} | Status: {'warm_hit' if is_already_running else 'cold_boot'} | Duration: {boot_duration:.1f}s")
+                status = proxmox.nodes(node).qemu(new_vmid).status.current.get()
+                boot_start = time.perf_counter()
+                is_already_running = status.get("status") == "running"
+                if not is_already_running:
+                    hw_updates = {}
+                    if cpu_cores and cpu_cores > 0:
+                        hw_updates["cores"] = cpu_cores
+                    if ram_mb and ram_mb >= 512:
+                        hw_updates["memory"] = ram_mb
+                    if hw_updates:
+                        try:
+                            proxmox.nodes(node).qemu(new_vmid).config.post(**hw_updates)
+                        except Exception as hw_e:
+                            logger.warning(f"Could not apply hardware updates to VM {new_vmid}: {hw_e}")
+                    print(f"[+] Starting VM {new_vmid}...", flush=True)
+                    start_upid = proxmox.nodes(node).qemu(new_vmid).status.start.post()
+                    _wait_for_pve_task(proxmox, node, start_upid, f"starting VM {new_vmid}")
+                ip_address = _wait_for_guest_vlan_ip(proxmox, node, new_vmid)
+                if not is_already_running:
+                    if settings.VM_VERIFY_CONNECTION:
+                        _wait_for_connection(ip_address, new_vmid, protocol, port)
+                    else:
+                        print(f"[+] Waiting {settings.VM_BOOT_WAIT_SECONDS}s for guest VM {new_vmid} "
+                              "to finish booting...", flush=True)
+                        time.sleep(settings.VM_BOOT_WAIT_SECONDS)
+                    if is_exam_mode:
+                        try:
+                            restore_vm_workspace(new_vmid, student_username, lab_id, config["lab_vm_id"])
+                        except Exception as ws_err:
+                            logger.warning(f"[EXAM_WORKSPACE] Workspace restore skipped/failed on VM {new_vmid}: {ws_err}")
+                if protocol.lower() == "rdp" or port == 3389:
+                    _ensure_fakenet_rdp_whitelist(proxmox, node, new_vmid)
+                logger.info(f"[VM_ORCHESTRATION] VM_ONLINE | User: {student_username} | VMID: {new_vmid} | "
+                            f"IP: {ip_address} | {protocol.upper()}:{port} | "
+                            f"Status: {'warm_hit' if is_already_running else 'cold_boot'} | "
+                            f"Duration: {time.perf_counter() - boot_start:.1f}s")
+                print(f"[VM-SESSION] Provisioned VM vmid={new_vmid} ip={ip_address} guest=started", flush=True)
+                results.append((ip_address, new_vmid))
         except VMProvisionError:
             raise
         except Exception as exc:
-            logger.error(f"[VM_ORCHESTRATION] FAILED on VMID {new_vmid} for User {student_username}: {exc}", exc_info=True)
+            logger.error(f"[VM_ORCHESTRATION] FAILED on VMID {new_vmid} for User {student_username}: {exc}",
+                         exc_info=True)
             raise VMProvisionError(f"Proxmox operation failed for VM {new_vmid}: {exc}") from exc
-
-        print(
-            f"[VM-SESSION] Provisioned VM vmid={new_vmid} ip={ip_address} guest=started",
-            flush=True,
-        )
-        return ip_address, new_vmid
+    return results
 
 
 
@@ -510,6 +555,7 @@ def get_guacamole_secret_bytes(secret_str: str) -> bytes:
 def generate_guacamole_auth_json_url(
     ip_address: str, 
     student_username: str,
+    lab_vm_id: int,
     protocol: str,
     port: int,
     username: str | None = None,
@@ -534,7 +580,7 @@ def generate_guacamole_auth_json_url(
     
     expires_ms = int((time.time() + settings.GUAC_SESSION_TTL_SECONDS) * 1000)
     session_ts = int(time.time())  # Timestamp để tạo connection_name duy nhất mỗi phiên
-    connection_name = f"Lab-VM-{student_username}-{session_ts}"
+    connection_name = f"Lab-VM-{student_username}-{lab_vm_id}-{session_ts}"
     
 
     protocol = protocol.lower()
@@ -619,51 +665,52 @@ def generate_guacamole_auth_json_url(
     return url
 
 def rollback_student_vm(student_username: str, lab_id: int, is_exam_mode: bool = False) -> bool:
-    """Tắt và xóa sạch TẤT CẢ các bản VM của sinh viên ở bài lab này (kể cả khi bị tạo trùng lặp nhiều VM)"""
-    node = settings.PVE_NODE
+    """Back up/stop each student VM as before, then delete its entire gateway group."""
     proxmox = get_pve_client()
     if not proxmox:
         raise VMProvisionError("Cannot connect to the Proxmox API")
-
     try:
+        group = _find_student_group(student_username, lab_id)
+        if group is None:
+            return True
         resources = proxmox.cluster.resources.get(type="vm")
         matching_vms = _find_all_student_vms(resources, student_username, lab_id)
-        if not matching_vms:
-            return True
-
+        detail = proxmox.cluster.qemu.groups(group["id"]).get()
+        owned = {int(vm["vmid"]) for vm in matching_vms}
+        for member in detail.get("members", []):
+            target_vmid = int(member["vmid"])
+            if (target_vmid not in owned or not
+                    settings.STUDENT_VMID_MIN <= target_vmid <= settings.STUDENT_VMID_MAX):
+                logger.error(f"[SECURITY_ALERT] Target VMID {target_vmid} is outside student ownership/boundary. "
+                             "Group deletion skipped.")
+                raise VMProvisionError(f"Group contains an unauthorized VMID: {target_vmid}")
         for vm in matching_vms:
-            target_vmid = int(vm["vmid"])
-            # Security guard: never operate outside student VMID boundary
-            if not (settings.STUDENT_VMID_MIN <= target_vmid <= settings.STUDENT_VMID_MAX):
-                logger.error(
-                    f"[SECURITY_ALERT] Target VMID {target_vmid} ({vm.get('name')}) is OUTSIDE "
-                    f"student boundary [{settings.STUDENT_VMID_MIN}, {settings.STUDENT_VMID_MAX}]. Skipped."
-                )
+            target_vmid, node = int(vm["vmid"]), vm["node"]
+            # Only process members that will be deleted by this recursive request.
+            if target_vmid not in {int(member["vmid"]) for member in detail.get("members", [])}:
                 continue
-
-            try:
-                status = proxmox.nodes(node).qemu(target_vmid).status.current.get()
-                if status.get("status") == "running":
-                    # Tự động sao lưu Exam_Workspace trước khi xóa máy ảo để không mất bài làm (nếu là bài thi)
-                    if is_exam_mode:
-                        try:
-                            backup_vm_workspace(target_vmid, student_username, lab_id)
-                            logger.info(f"[EXAM_WORKSPACE] Auto-backed up workspace for {student_username} before rollback on VM {target_vmid}")
-                        except Exception as ws_err:
-                            logger.warning(f"[EXAM_WORKSPACE] Auto-backup failed before rollback on VM {target_vmid}: {ws_err}")
-
-                    print(f"[+] Stopping VM {target_vmid} for rollback...", flush=True)
-                    stop_upid = proxmox.nodes(node).qemu(target_vmid).status.stop.post()
+            status = proxmox.nodes(node).qemu(target_vmid).status.current.get()
+            if status.get("status") == "running":
+                if is_exam_mode:
+                    try:
+                        lab_vm_id = int(re.match(r"^lab-\d+-vm-(\d+)-", vm["name"])[1])
+                        backup_vm_workspace(target_vmid, student_username, lab_id, lab_vm_id)
+                        logger.info(f"[EXAM_WORKSPACE] Auto-backed up workspace for {student_username} "
+                                    f"before rollback on VM {target_vmid}")
+                    except Exception as ws_err:
+                        logger.warning(f"[EXAM_WORKSPACE] Auto-backup failed before rollback on VM {target_vmid}: {ws_err}")
+                print(f"[+] Stopping VM {target_vmid} for rollback...", flush=True)
+                stop_upid = proxmox.nodes(node).qemu(target_vmid).status.stop.post()
+                try:
                     _wait_for_pve_task(proxmox, node, stop_upid, f"stopping VM {target_vmid}")
-
-                print(f"[+] Destroying VM {target_vmid} for rollback...", flush=True)
-                destroy_upid = proxmox.nodes(node).qemu(target_vmid).delete(purge=1)
-                _wait_for_pve_task(proxmox, node, destroy_upid, f"destroying VM {target_vmid}")
-                logger.info(f"[VM_ORCHESTRATION] ROLLBACK | User: {student_username} | LabID: {lab_id} | Purged VMID: {target_vmid}")
-                print(f"[+] VM {target_vmid} purged successfully from Proxmox!", flush=True)
-            except Exception as single_err:
-                logger.warning(f"Could not purge VM {target_vmid} during rollback: {single_err}")
-
+                except Exception as single_err:
+                    logger.warning(f"Could not stop VM {target_vmid} during rollback: {single_err}")
+                    raise
+        _delete_student_group(group)
+        for member in detail.get("members", []):
+            target_vmid = int(member["vmid"])
+            logger.info(f"[VM_ORCHESTRATION] ROLLBACK | User: {student_username} | LabID: {lab_id} | Purged VMID: {target_vmid}")
+            print(f"[+] VM {target_vmid} purged successfully from Proxmox!", flush=True)
         return True
     except VMProvisionError:
         raise
@@ -703,7 +750,6 @@ def get_available_templates() -> List[Dict[str, Any]]:
 
 def list_lab_vms(lab_id: int, students: List[Any]) -> List[Dict[str, Any]]:
     """Lấy thông tin và trạng thái thực tế của tất cả máy ảo sinh viên thuộc về bài lab này"""
-    node = settings.PVE_NODE
     proxmox = get_pve_client()
     vm_list = []
     resources = []
@@ -713,46 +759,55 @@ def list_lab_vms(lab_id: int, students: List[Any]) -> List[Dict[str, Any]]:
         except Exception as exc:
             print(f"[!] Error fetching student VMs from Proxmox: {exc}")
 
+    # Keep the public (lab_id, students) contract; close the DB read before HTTP calls.
+    from app.database import SessionLocal
+    from app.models import LabVM
+    with SessionLocal() as db:
+        lab_vm_ids = [row.id for row in db.query(LabVM).filter(LabVM.lab_id == lab_id).order_by(LabVM.id).all()]
+
     for student in students:
-        student_username = student.username
-        existing_vm = _find_student_vm(resources, student_username, lab_id)
-        vmid = (
-            int(existing_vm["vmid"])
-            if existing_vm
-            else _preferred_student_vmid(student_username, lab_id)
-        )
+        for lab_vm_id in lab_vm_ids:
+            student_username = student.username
+            existing_vm = _find_student_vm(resources, student_username, lab_id, lab_vm_id)
+            vmid = (
+                int(existing_vm["vmid"])
+                if existing_vm
+                else _preferred_student_vmid(student_username, lab_id, lab_vm_id)
+            )
 
 
-        vm_item = {
-            "student_id": student.id,
-            "student_username": student_username,
-            "student_full_name": student.full_name,
-            "vmid": vmid,
-            "ip_address": None,
-            "status": "not_created",
-            "name": _student_vm_name(student_username, lab_id),
-            "cpu": 0,
-            "mem": 0,
-            "maxmem": 0,
-            "uptime": 0
-        }
+            vm_item = {
+                "lab_vm_id": lab_vm_id,
+                "student_id": student.id,
+                "student_username": student_username,
+                "student_full_name": student.full_name,
+                "vmid": vmid,
+                "ip_address": None,
+                "status": "not_created",
+                "name": _student_vm_name(student_username, lab_id, lab_vm_id),
+                "cpu": 0,
+                "mem": 0,
+                "maxmem": 0,
+                "uptime": 0
+            }
 
-        if proxmox and existing_vm:
-            try:
-                st = proxmox.nodes(node).qemu(vmid).status.current.get()
-                vm_item["status"] = st.get("status", "stopped")
-                vm_item["cpu"] = round(st.get("cpu", 0) * 100, 1)
-                vm_item["mem"] = round(st.get("mem", 0) / (1024 * 1024), 0)
-                vm_item["maxmem"] = round(st.get("maxmem", 0) / (1024 * 1024), 0)
-                vm_item["uptime"] = st.get("uptime", 0)
-                if st.get("status") == "running":
-                    ip_address = _get_guest_vlan_ip(proxmox, node, vmid)
-                    if ip_address:
-                        vm_item["ip_address"] = ip_address
-            except Exception:
-                vm_item["status"] = "not_created"
+            if proxmox and existing_vm:
+                try:
+                    node = existing_vm["node"]
+                    st = proxmox.nodes(node).qemu(vmid).status.current.get()
+                    vm_item["status"] = st.get("status", "stopped")
+                    vm_item["cpu"] = round(st.get("cpu", 0) * 100, 1)
+                    vm_item["mem"] = round(st.get("mem", 0) / (1024 * 1024), 0)
+                    vm_item["maxmem"] = round(st.get("maxmem", 0) / (1024 * 1024), 0)
+                    vm_item["uptime"] = st.get("uptime", 0)
+                    if st.get("status") == "running":
+                        ip_address = _get_guest_vlan_ip(proxmox, node, vmid)
+                        if ip_address:
+                            vm_item["ip_address"] = ip_address
+                except Exception:
+                    vm_item["status"] = "not_created"
 
-        vm_list.append(vm_item)
+            vm_list.append(vm_item)
 
     return vm_list
 
@@ -772,19 +827,28 @@ def control_student_vm(vmid: int, action: str) -> Dict[str, Any]:
             )
         }
 
-    node = settings.PVE_NODE
     proxmox = get_pve_client()
     if not proxmox:
         return {"success": False, "message": "Không thể kết nối Proxmox VE API"}
 
     try:
+        if action not in {"start", "stop", "purge", "delete"}:
+            return {"success": False, "message": "Hành động không hợp lệ"}
+        resources = proxmox.cluster.resources.get(type="vm")
+        vm = next((item for item in resources if int(item.get("vmid", -1)) == vmid), None)
+        if vm is None:
+            logger.warning(f"[VM_ORCHESTRATION] VM {vmid} not found for action {action}")
+            return {"success": False, "message": f"Không tìm thấy máy ảo sinh viên {vmid}"}
+        node = vm["node"]
         if action == "start":
-            proxmox.nodes(node).qemu(vmid).status.start.post()
+            start_upid = proxmox.nodes(node).qemu(vmid).status.start.post()
+            _wait_for_pve_task(proxmox, node, start_upid, f"starting VM {vmid}")
             msg = f"Đã gửi lệnh bật máy ảo sinh viên {vmid}"
             logger.info(f"[VM_ORCHESTRATION] CONTROL | Action: START | VMID: {vmid}")
             return {"success": True, "message": msg}
         elif action == "stop":
-            proxmox.nodes(node).qemu(vmid).status.stop.post()
+            stop_upid = proxmox.nodes(node).qemu(vmid).status.stop.post()
+            _wait_for_pve_task(proxmox, node, stop_upid, f"stopping VM {vmid}")
             msg = f"Đã gửi lệnh tắt máy ảo sinh viên {vmid}"
             logger.info(f"[VM_ORCHESTRATION] CONTROL | Action: STOP | VMID: {vmid}")
             return {"success": True, "message": msg}
@@ -808,10 +872,7 @@ def control_student_vm(vmid: int, action: str) -> Dict[str, Any]:
                     pass
 
             destroy_upid = proxmox.nodes(node).qemu(vmid).delete(purge=1)
-            try:
-                _wait_for_pve_task(proxmox, node, destroy_upid, f"purging VM {vmid}")
-            except Exception:
-                pass
+            _wait_for_pve_task(proxmox, node, destroy_upid, f"purging VM {vmid}")
 
             msg = f"Đã xóa hoàn toàn máy ảo sinh viên {vmid} khỏi Proxmox cluster"
             logger.info(f"[VM_ORCHESTRATION] CONTROL | Action: PURGE | VMID: {vmid}")
@@ -824,58 +885,57 @@ def control_student_vm(vmid: int, action: str) -> Dict[str, Any]:
 
 
 def clean_orphaned_student_vms(active_lab_ids: List[int]) -> Dict[str, Any]:
-    """
-    Quét toàn bộ cluster Proxmox tìm và xóa sạch các máy ảo sinh viên
-    có tiền tố lab-<id>-... mà lab_id không còn nằm trong active_lab_ids.
-    Chỉ tác động trong dải STUDENT_VMID_MIN đến STUDENT_VMID_MAX.
-    """
+    """Clean orphaned Malsec groups (including empty ones); report VM counts as before."""
     proxmox = get_pve_client()
     if not proxmox:
         return {"success": False, "message": "Không thể kết nối Proxmox VE API", "purged_count": 0, "details": []}
-
-    node = settings.PVE_NODE
-    purged = []
-    failed = []
-
+    purged, failed = [], []
     try:
         resources = proxmox.cluster.resources.get(type="vm")
         active_set = set(active_lab_ids)
-
-        for res in resources:
-            vmid = int(res.get("vmid", -1))
-            vm_name = res.get("name", "")
-
-            # Security Boundary Guard: Chỉ quét dải máy ảo sinh viên
-            if not (settings.STUDENT_VMID_MIN <= vmid <= settings.STUDENT_VMID_MAX):
+        for group in proxmox.cluster.qemu.groups.get():
+            match = re.match(r"^lab-(\d+)-", group.get("name", ""))
+            if not match or int(match[1]) in active_set:
                 continue
-
-            # Kiểm tra tên định dạng: lab-{lab_id}-... hoặc lab-{lab_id}
-            if vm_name.startswith("lab-"):
-                parts = vm_name.split("-")
-                if len(parts) >= 2 and parts[1].isdigit():
-                    vm_lab_id = int(parts[1])
-                    # Nếu lab không còn tồn tại trên hệ thống
-                    if vm_lab_id not in active_set:
-                        try:
-                            logger.info(f"[ORPHAN_CLEANUP] Found orphaned VM {vmid} ('{vm_name}') for non-existent Lab {vm_lab_id}. Purging...")
-                            res_control = control_student_vm(vmid, "purge")
-                            if res_control.get("success"):
-                                purged.append({"vmid": vmid, "name": vm_name, "lab_id": vm_lab_id})
-                            else:
-                                failed.append({"vmid": vmid, "name": vm_name, "error": res_control.get("message")})
-                        except Exception as exc:
-                            failed.append({"vmid": vmid, "name": vm_name, "error": str(exc)})
-
+            lab_id = int(match[1])
+            try:
+                logger.info(f"[ORPHAN_CLEANUP] Found orphaned group {group['name']} for non-existent Lab {lab_id}. Purging...")
+                members = _delete_student_group(group)
+                for member in members:
+                    vmid = int(member["vmid"])
+                    name = next((vm.get("name", "") for vm in resources if int(vm.get("vmid", -1)) == vmid), "")
+                    purged.append({"vmid": vmid, "name": name, "lab_id": lab_id})
+            except Exception as exc:
+                failed.append({"group_id": group["id"], "name": group["name"], "error": str(exc)})
         return {
             "success": True,
             "message": f"Đã dọn dẹp thành công {len(purged)} máy ảo mồ côi." if purged else "Không phát hiện máy ảo mồ côi nào cần dọn dẹp.",
-            "purged_count": len(purged),
-            "purged": purged,
-            "failed": failed
+            "purged_count": len(purged), "purged": purged, "failed": failed,
         }
     except Exception as e:
         logger.error(f"[ORPHAN_CLEANUP] Failed to scan or clean orphaned VMs: {e}", exc_info=True)
         return {"success": False, "message": f"Lỗi quét máy ảo: {str(e)}", "purged_count": 0, "details": []}
+
+
+def delete_lab_groups(lab_id: int) -> None:
+    """Complete gateway group cleanup before a lab/class deletes its definitions."""
+    proxmox = get_pve_client()
+    if not proxmox:
+        raise VMProvisionError("Cannot connect to the Proxmox API")
+    for group in proxmox.cluster.qemu.groups.get():
+        if re.match(rf"^lab-{lab_id}-", group.get("name", "")):
+            _delete_student_group(group)
+
+
+def _vm_ssh_host(vmid: int) -> str:
+    """Locate the native node, not the HTTP gateway, for existing SSH VM operations."""
+    proxmox = get_pve_client()
+    if not proxmox:
+        raise VMProvisionError("Cannot connect to the Proxmox API")
+    resources = proxmox.cluster.resources.get(type="vm")
+    node = next(vm["node"] for vm in resources if int(vm.get("vmid", -1)) == vmid)
+    nodes = proxmox.cluster.status.get()
+    return next((item["ip"] for item in nodes if item.get("name") == node and item.get("ip")), node)
 
 
 def capture_vm_screenshot(vmid: int) -> bytes:
@@ -891,14 +951,15 @@ def capture_vm_screenshot(vmid: int) -> bytes:
         raise ValueError(f"VMID {vmid} is outside allowed screenshot range")
 
     pve_cmd = f"TMP=$(mktemp /tmp/sc_XXXXXX.ppm); echo screendump $TMP | qm monitor {vmid} >/dev/null 2>&1; cat $TMP; rm -f $TMP"
-    ssh_cmd = [
-        "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=8",
-        f"root@{settings.PVE_API_HOST}",
-        pve_cmd
-    ]
     try:
+        node_ip = _vm_ssh_host(vmid)
+        ssh_cmd = [
+            "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            f"root@{node_ip}",
+            pve_cmd
+        ]
         res = subprocess.run(ssh_cmd, capture_output=True, timeout=15)
         raw = res.stdout
         ppm_idx = raw.find(b"P6")
@@ -950,15 +1011,15 @@ $dest = Join-Path $desk '{filename}'
         # Lưu vào Desktop Linux (/home/*/Desktop hoặc /root/Desktop)
         sh_cmd = f"cat - | base64 -d > ~/Desktop/{filename} 2>/dev/null || cat - | base64 -d > /tmp/{filename}"
         pve_exec_cmd = f"qm guest exec {vmid} --pass-stdin 1 -- sh -c \"{sh_cmd}\""
-
-    remote_ssh = [
-        "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=10",
-        f"root@{settings.PVE_API_HOST}",
-        pve_exec_cmd
-    ]
     try:
+        node_ip = _vm_ssh_host(vmid)
+        remote_ssh = [
+            "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            f"root@{node_ip}",
+            pve_exec_cmd
+        ]
         res = subprocess.run(remote_ssh, input=b64_str, capture_output=True, text=True, timeout=20)
         logger.info(f"[SCREENSHOT] Saved {filename} to VM {vmid} Desktop. Output: {res.stdout.strip()}")
         return {
@@ -973,7 +1034,7 @@ $dest = Join-Path $desk '{filename}'
         raise RuntimeError(f"Lỗi ghi ảnh vào máy ảo: {str(exc)}")
 
 
-def backup_vm_workspace(vmid: int, student_username: str, lab_id: int) -> Optional[str]:
+def backup_vm_workspace(vmid: int, student_username: str, lab_id: int, lab_vm_id: int) -> Optional[str]:
     """
     Sao lưu toàn bộ thư mục C:\\Users\\<Student>\\Desktop\\Exam_Workspace từ VM về server MalSec.
     Dùng khi sinh viên bấm Rollback VM hoặc nộp bài thi.
@@ -1013,14 +1074,15 @@ if (Test-Path -LiteralPath $ws) {
 """
     ps_b64 = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
     pve_exec_cmd = f"qm guest exec {vmid} --pass-stdin 1 powershell -- -NoProfile -EncodedCommand {ps_b64}"
-    remote_ssh = [
-        "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=10",
-        f"root@{settings.PVE_API_HOST}",
-        pve_exec_cmd
-    ]
     try:
+        node_ip = _vm_ssh_host(vmid)
+        remote_ssh = [
+            "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            f"root@{node_ip}",
+            pve_exec_cmd
+        ]
         res = subprocess.run(remote_ssh, input="", capture_output=True, text=True, timeout=40)
         out_raw = res.stdout.strip()
         data = json.loads(out_raw) if out_raw.startswith("{") else {}
@@ -1037,7 +1099,7 @@ if (Test-Path -LiteralPath $ws) {
 
         backup_dir = os.path.join(settings.UPLOAD_DIR, "exam_workspaces", f"lab_{lab_id}")
         os.makedirs(backup_dir, exist_ok=True)
-        backup_path = os.path.join(backup_dir, f"student_{student_username}_workspace.zip")
+        backup_path = os.path.join(backup_dir, f"student_{student_username}_vm_{lab_vm_id}_workspace.zip")
         with open(backup_path, "wb") as f:
             f.write(zip_bytes)
 
@@ -1048,7 +1110,7 @@ if (Test-Path -LiteralPath $ws) {
         return None
 
 
-def restore_vm_workspace(vmid: int, student_username: str, lab_id: int) -> bool:
+def restore_vm_workspace(vmid: int, student_username: str, lab_id: int, lab_vm_id: int) -> bool:
     """
     Phục hồi thư mục Exam_Workspace từ server MalSec vào VM sau khi rollback hoặc khi khởi động.
     Nếu chưa có backup, tự động tạo sẵn thư mục Exam_Workspace trên Desktop kèm file hướng dẫn.
@@ -1058,7 +1120,7 @@ def restore_vm_workspace(vmid: int, student_username: str, lab_id: int) -> bool:
     import base64
     import subprocess
 
-    backup_path = os.path.join(settings.UPLOAD_DIR, "exam_workspaces", f"lab_{lab_id}", f"student_{student_username}_workspace.zip")
+    backup_path = os.path.join(settings.UPLOAD_DIR, "exam_workspaces", f"lab_{lab_id}", f"student_{student_username}_vm_{lab_vm_id}_workspace.zip")
     zip_b64 = ""
     if os.path.exists(backup_path):
         try:
@@ -1111,14 +1173,15 @@ IMPORTANT NOTES:
 """
     ps_b64 = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
     pve_exec_cmd = f"qm guest exec {vmid} --pass-stdin 1 powershell -- -NoProfile -EncodedCommand {ps_b64}"
-    remote_ssh = [
-        "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=10",
-        f"root@{settings.PVE_API_HOST}",
-        pve_exec_cmd
-    ]
     try:
+        node_ip = _vm_ssh_host(vmid)
+        remote_ssh = [
+            "ssh", "-i", getattr(settings, "PVE_SSH_KEY", "/root/.ssh/id_pve_sync"),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            f"root@{node_ip}",
+            pve_exec_cmd
+        ]
         res = subprocess.run(remote_ssh, input=zip_b64, capture_output=True, text=True, timeout=40)
         logger.info(f"[EXAM_WORKSPACE] Restored/Initialized workspace for {student_username} on VM {vmid}. Output: {res.stdout.strip()}")
         return True

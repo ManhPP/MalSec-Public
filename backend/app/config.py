@@ -100,7 +100,6 @@ class Settings:
         self.PVE_API_USER = _required_env("PVE_API_USER")
         self.PVE_TOKEN_NAME = _required_env("PVE_TOKEN_NAME")
         self.PVE_TOKEN_VALUE = _required_env("PVE_TOKEN_VALUE")
-        self.PVE_NODE = _required_env("PVE_NODE")
         self.PVE_VERIFY_SSL = _required_bool("PVE_VERIFY_SSL")
         self.PVE_SSH_HOST = os.getenv("PVE_SSH_HOST", self.PVE_API_HOST)
         self.PVE_SSH_USER = os.getenv("PVE_SSH_USER", "root")

@@ -253,14 +253,21 @@ def delete_class(
 ):
     """Delete a class (Admin only) - Automatically cleans up physical attachment files and Proxmox student VMs"""
     import os
-    from app.models import Lab, Submission
-    from app.services.vm_service import get_pve_client, control_student_vm
+    from app.models import Lab, LabVM, Submission
+    from app.services.vm_service import delete_lab_groups
 
     class_ = db.query(Class).filter(Class.id == class_id).first()
     if not class_:
         raise HTTPException(status_code=404, detail="Class not found")
         
     lab_ids = [lab.id for lab in class_.labs]
+
+    # Finish native group cleanup before deleting definitions or classroom records.
+    try:
+        for lab_id in lab_ids:
+            delete_lab_groups(lab_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Cannot delete lab groups: {exc}") from exc
 
     # 1. Thu thập và xóa an toàn các file vật lý đính kèm trên ổ cứng
     if lab_ids:
@@ -282,27 +289,10 @@ def delete_class(
                     except Exception:
                         pass
 
-        # 2. Thu dọn và xóa hoàn toàn các máy ảo (VM) của sinh viên trên Proxmox liên quan đến các lab này
-        proxmox = get_pve_client()
-        if proxmox:
-            try:
-                resources = proxmox.cluster.resources.get(type="vm")
-                for res in resources:
-                    vm_name = res.get("name", "")
-                    vmid = int(res.get("vmid", -1))
-                    # Kiểm tra xem VM có thuộc về bất kỳ lab nào trong lớp này hay không
-                    # Quy chuẩn đặt tên: lab-{lab_id}-{username} hoặc lab-{lab_id}-...
-                    for lid in lab_ids:
-                        if vm_name == f"lab-{lid}" or vm_name.startswith(f"lab-{lid}-"):
-                            try:
-                                control_student_vm(vmid, "purge")
-                            except Exception:
-                                pass
-            except Exception:
-                pass
-
         # 3. Xóa submissions trong database
         db.query(Submission).filter(Submission.lab_id.in_(lab_ids)).delete(synchronize_session=False)
+
+    db.query(LabVM).filter(LabVM.lab_id.in_(lab_ids)).delete(synchronize_session=False)
 
     # 4. Xóa labs trong class
     db.query(Lab).filter(Lab.class_id == class_id).delete(synchronize_session=False)
@@ -497,7 +487,7 @@ def get_class_analytics(
         target_labs = all_labs
     
     # 1. Truy vấn tài nguyên Proxmox để kiểm tra máy ảo của sinh viên lớp này
-    from app.services.vm_service import get_pve_client, _is_vm_owned_by_student, _find_student_vm
+    from app.services.vm_service import get_pve_client, _is_vm_owned_by_student, _find_all_student_vms
     running_vms_count = 0
     total_cloned_vms = 0
     student_vm_status_map = {} # {student_username: {status: 'running'|'stopped'|'none', vmid: int|None}}
@@ -516,7 +506,7 @@ def get_class_analytics(
                 for s_name in student_usernames:
                     # Nếu lọc theo lab cụ thể, chỉ đếm VM thuộc lab đó
                     if selected_lab:
-                        owned = (name == f"lab-{selected_lab.id}-{s_name}" or name.startswith(f"lab-{selected_lab.id}-{s_name}-"))
+                        owned = bool(_find_all_student_vms([res], s_name, selected_lab.id))
                     else:
                         owned = _is_vm_owned_by_student(name, s_name)
 

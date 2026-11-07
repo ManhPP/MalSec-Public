@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 from app.database import get_db
 from app.config import settings
 from app.logging_config import logger
-from app.models import Lab, User, Class, AuditLog, VmToolFile, ExtensionRequest
+from app.models import Lab, LabVM, User, Class, AuditLog, VmToolFile, ExtensionRequest
 from app.request_utils import get_client_ip
 from app.schemas import LabOut, LabCreate, LabUpdate, LabClone, ExtensionRequestCreate, ExtensionRequestRespond, ExtensionRequestBatchRespond, ExtensionRequestOut
 from app.security import require_lecturer, require_student, get_current_user, require_any_user
@@ -107,6 +107,22 @@ def get_lab_detail(
             
     return lab
 
+def _validate_lab_vm(configuration: LabVM, enabled: bool) -> None:
+    """Apply the original Malsec VM checks to each saved machine definition."""
+    configuration.vm_username = (configuration.vm_username or "").strip() or None
+    configuration.vm_password = configuration.vm_password or None
+    if not enabled:
+        return
+    if configuration.template_vmid is None or not (
+            settings.TEMPLATE_VMID_MIN <= configuration.template_vmid <= settings.TEMPLATE_VMID_MAX):
+        raise HTTPException(status_code=422, detail=(
+            "VM template phải nằm trong dải "
+            f"{settings.TEMPLATE_VMID_MIN} - {settings.TEMPLATE_VMID_MAX}"))
+    if configuration.vm_protocol in {"rdp", "ssh"} and not configuration.vm_username:
+        raise HTTPException(status_code=422, detail="RDP/SSH yêu cầu tên đăng nhập máy ảo")
+    if not configuration.vm_password:
+        raise HTTPException(status_code=422, detail="Vui lòng nhập mật khẩu kết nối máy ảo")
+
 @router.post("/", response_model=LabOut, status_code=status.HTTP_201_CREATED)
 def create_lab(
     lab_data: LabCreate,
@@ -123,32 +139,27 @@ def create_lab(
     if current_user.role == "lecturer" and current_user not in class_exists.users:
         raise HTTPException(status_code=403, detail="Bạn không có quyền tạo bài lab cho lớp học phần này")
 
-    vm_username = (lab_data.vm_username or "").strip() or None
-    vm_password = lab_data.vm_password or None
-    if lab_data.enable_vm:
-        if lab_data.template_vmid is None or not (
-            settings.TEMPLATE_VMID_MIN
-            <= lab_data.template_vmid
-            <= settings.TEMPLATE_VMID_MAX
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "VM template phải nằm trong dải "
-                    f"{settings.TEMPLATE_VMID_MIN} - {settings.TEMPLATE_VMID_MAX}"
-                ),
-            )
-        if lab_data.vm_protocol in {"rdp", "ssh"} and not vm_username:
-            raise HTTPException(
-                status_code=422,
-                detail="RDP/SSH yêu cầu tên đăng nhập máy ảo",
-            )
-        if not vm_password:
-            raise HTTPException(
-                status_code=422,
-                detail="Vui lòng nhập mật khẩu kết nối máy ảo",
-            )
-        
+    vm_fields = ("template_vmid", "is_linked_clone", "vm_protocol", "vm_port", "vm_username",
+                 "vm_password", "vm_drive_mode", "vm_drive_files", "cpu_cores", "ram_mb")
+    if lab_data.vms and set(vm_fields) & lab_data.model_fields_set:
+        raise HTTPException(status_code=422, detail="Không kết hợp cấu hình VM đơn và danh sách vms")
+    rows = ([item.model_dump() for item in lab_data.vms] if "vms" in lab_data.model_fields_set
+            else [{key: getattr(lab_data, key) for key in vm_fields}])
+    # An old flat request may disable VMs and explicitly have no template.
+    # Represent that as no machine definition, not an invalid NOT NULL record.
+    if not lab_data.enable_vm and "vms" not in lab_data.model_fields_set and lab_data.template_vmid is None:
+        rows = []
+    if lab_data.enable_vm and not rows:
+        raise HTTPException(status_code=422, detail="Bài lab cần ít nhất một cấu hình máy ảo")
+    definitions = []
+    for values in rows:
+        values["is_linked_clone"] = True if values.get("is_linked_clone") is None else values["is_linked_clone"]
+        values["vm_drive_mode"] = values.get("vm_drive_mode") or "default"
+        values["vm_drive_files"] = values.get("vm_drive_files") or []
+        configuration = LabVM(**values)
+        _validate_lab_vm(configuration, bool(lab_data.enable_vm))
+        definitions.append(configuration)
+
     new_lab = Lab(
         title=lab_data.title,
         description=lab_data.description,
@@ -162,32 +173,25 @@ def create_lab(
         created_by_id=current_user.id,
         is_active=lab_data.is_active,
         enable_vm=lab_data.enable_vm,
-        template_vmid=lab_data.template_vmid,
-        is_linked_clone=lab_data.is_linked_clone if lab_data.is_linked_clone is not None else True,
-        vm_protocol=lab_data.vm_protocol,
-        vm_port=lab_data.vm_port,
-        vm_username=vm_username,
-        vm_password=vm_password,
-        vm_drive_mode=lab_data.vm_drive_mode or "default",
-        vm_drive_files=lab_data.vm_drive_files or [],
         disable_vm_copy=bool(lab_data.disable_vm_copy) if lab_data.disable_vm_copy is not None else False,
         disable_vm_paste=bool(lab_data.disable_vm_paste) if lab_data.disable_vm_paste is not None else False,
         is_exam_mode=bool(lab_data.is_exam_mode) if lab_data.is_exam_mode is not None else False,
-        cpu_cores=lab_data.cpu_cores,
-        ram_mb=lab_data.ram_mb,
     )
+    new_lab.vms = definitions
     db.add(new_lab)
     db.commit()
     db.refresh(new_lab)
 
-    # Nếu lab chọn custom drive files, tự động biên dịch lab-{id}.iso trên Proxmox
-    if new_lab.vm_drive_mode == "custom" and new_lab.vm_drive_files:
-        try:
-            from app.services.iso_tool_service import IsoToolService
-            IsoToolService.build_lab_iso(new_lab.id, new_lab.vm_drive_files)
-        except Exception as e:
-            logger.error(f"[LABS] Failed to build custom lab ISO for Lab {new_lab.id}: {e}")
-    
+    # Custom ISO remains one artifact per machine configuration.
+    for configuration in new_lab.vms:
+        if configuration.vm_drive_mode == "custom" and configuration.vm_drive_files:
+            try:
+                from app.services.iso_tool_service import IsoToolService
+                IsoToolService.build_lab_iso(new_lab.id, configuration.id, configuration.vm_drive_files)
+            except Exception as e:
+                logger.error(f"[LABS] Failed to build custom lab ISO for Lab {new_lab.id}, "
+                             f"VM configuration {configuration.id}: {e}")
+
     # Ghi log hoạt động
     log = AuditLog(
         user_id=current_user.id,
@@ -217,6 +221,49 @@ def update_lab(
         if not class_exists or current_user not in class_exists.users:
             raise HTTPException(status_code=403, detail="Bạn không quản lý lớp chứa bài lab này")
             
+    editable_fields = ("cpu_cores", "ram_mb", "vm_drive_mode", "vm_drive_files",
+                       "vm_protocol", "vm_port", "vm_username", "vm_password")
+    legacy_fields = set(editable_fields) | {"template_vmid", "is_linked_clone"}
+    if lab_data.vms is not None and legacy_fields & lab_data.model_fields_set:
+        raise HTTPException(status_code=422, detail="Không kết hợp cấu hình VM đơn và danh sách vms")
+    changes = {}
+    if lab_data.vms is not None:
+        for item in lab_data.vms:
+            if item.id in changes:
+                raise HTTPException(status_code=422, detail="ID cấu hình máy bị lặp")
+            changes[item.id] = item.model_dump(exclude_unset=True, exclude_none=True, exclude={"id"})
+    elif legacy_fields & lab_data.model_fields_set:
+        if len(lab.vms) != 1:
+            raise HTTPException(status_code=422, detail="Cần chỉ định cấu hình máy bằng vms[].id")
+        configuration = lab.vms[0]
+        for key in ("template_vmid", "is_linked_clone"):
+            value = getattr(lab_data, key)
+            if value is not None and value != getattr(configuration, key):
+                raise HTTPException(status_code=422, detail=f"Không được sửa {key} của cấu hình máy")
+        changes[configuration.id] = {
+            key: getattr(lab_data, key) for key in editable_fields
+            if key in lab_data.model_fields_set and getattr(lab_data, key) is not None}
+    definitions = {item.id: item for item in lab.vms}
+    if changes.keys() - definitions.keys():
+        raise HTTPException(status_code=422, detail="Cấu hình máy không thuộc bài lab")
+    enabled = lab.enable_vm if lab_data.enable_vm is None else lab_data.enable_vm
+    if enabled and not definitions:
+        raise HTTPException(status_code=422, detail="Bài lab cần ít nhất một cấu hình máy ảo")
+    iso_changed = []
+    for definition_id, definition in definitions.items():
+        candidate = LabVM(**{
+            key: getattr(definition, key) for key in
+            ("template_vmid", "is_linked_clone", *editable_fields)})
+        for key, value in changes.get(definition_id, {}).items():
+            setattr(candidate, key, value)
+        _validate_lab_vm(candidate, bool(enabled))
+        if (candidate.vm_drive_mode, candidate.vm_drive_files) != (
+                definition.vm_drive_mode, definition.vm_drive_files):
+            iso_changed.append(definition_id)
+        # Assign only the requested machine fields, preserving stable definition IDs.
+        for key in changes.get(definition_id, {}):
+            setattr(definition, key, getattr(candidate, key))
+
     if lab_data.title is not None:
         lab.title = lab_data.title
     if lab_data.description is not None:
@@ -237,18 +284,6 @@ def update_lab(
         lab.is_active = lab_data.is_active
     if lab_data.enable_vm is not None:
         lab.enable_vm = lab_data.enable_vm
-    if lab_data.template_vmid is not None:
-        lab.template_vmid = lab_data.template_vmid
-    if lab_data.is_linked_clone is not None:
-        lab.is_linked_clone = lab_data.is_linked_clone
-    if lab_data.vm_protocol is not None:
-        lab.vm_protocol = lab_data.vm_protocol
-    if lab_data.vm_port is not None:
-        lab.vm_port = lab_data.vm_port
-    if lab_data.vm_username is not None:
-        lab.vm_username = lab_data.vm_username.strip() or None
-    if lab_data.vm_password is not None:
-        lab.vm_password = lab_data.vm_password
     if lab_data.class_id is not None:
 
         # Check class exists
@@ -259,57 +294,28 @@ def update_lab(
             raise HTTPException(status_code=403, detail="Bạn không quản lý lớp học phần mới này")
         lab.class_id = lab_data.class_id
 
-    if lab_data.vm_drive_mode is not None:
-        lab.vm_drive_mode = lab_data.vm_drive_mode
-    if lab_data.vm_drive_files is not None:
-        lab.vm_drive_files = lab_data.vm_drive_files
     if lab_data.disable_vm_copy is not None:
         lab.disable_vm_copy = bool(lab_data.disable_vm_copy)
     if lab_data.disable_vm_paste is not None:
         lab.disable_vm_paste = bool(lab_data.disable_vm_paste)
     if lab_data.is_exam_mode is not None:
         lab.is_exam_mode = bool(lab_data.is_exam_mode)
-    if lab_data.cpu_cores is not None:
-        lab.cpu_cores = lab_data.cpu_cores
-    if lab_data.ram_mb is not None:
-        lab.ram_mb = lab_data.ram_mb
 
-    if lab.enable_vm:
-        if lab.template_vmid is None or not (
-            settings.TEMPLATE_VMID_MIN
-            <= lab.template_vmid
-            <= settings.TEMPLATE_VMID_MAX
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "VM template phải nằm trong dải "
-                    f"{settings.TEMPLATE_VMID_MIN} - {settings.TEMPLATE_VMID_MAX}"
-                ),
-            )
-        if lab.vm_protocol in {"rdp", "ssh"} and not lab.vm_username:
-            raise HTTPException(
-                status_code=422,
-                detail="RDP/SSH yêu cầu tên đăng nhập máy ảo",
-            )
-        if not lab.vm_password:
-            raise HTTPException(
-                status_code=422,
-                detail="Vui lòng nhập mật khẩu kết nối máy ảo",
-            )
-        
     db.commit()
     db.refresh(lab)
 
-    # Nếu lab chọn custom drive files, tự động biên dịch lại lab-{id}.iso và sync tới các VM đang chạy của bài lab
-    if lab.vm_drive_mode == "custom" and lab.vm_drive_files:
-        try:
-            from app.services.iso_tool_service import IsoToolService
-            IsoToolService.build_lab_iso(lab.id, lab.vm_drive_files)
-            iso_name = IsoToolService.get_lab_iso_basename(lab.id)
-            IsoToolService.sync_to_running_vms(lab_id=lab.id, iso_name=iso_name)
-        except Exception as e:
-            logger.error(f"[LABS] Failed to rebuild custom lab ISO for Lab {lab.id}: {e}")
+    # Rebuild/remount only an ISO whose machine configuration actually changed.
+    for definition_id in iso_changed:
+        configuration = definitions[definition_id]
+        if configuration.vm_drive_mode == "custom" and configuration.vm_drive_files:
+            try:
+                from app.services.iso_tool_service import IsoToolService
+                IsoToolService.build_lab_iso(lab.id, configuration.id, configuration.vm_drive_files)
+                iso_name = IsoToolService.get_lab_iso_basename(lab.id, configuration.id)
+                IsoToolService.sync_to_running_vms(lab_id=lab.id, lab_vm_id=configuration.id, iso_name=iso_name)
+            except Exception as e:
+                logger.error(f"[LABS] Failed to rebuild custom lab ISO for Lab {lab.id}, "
+                             f"VM configuration {configuration.id}: {e}")
 
     return lab
 
@@ -322,7 +328,7 @@ def delete_lab(
     """API Xóa bài lab (Giảng viên/Admin) - Tự động xóa file vật lý đính kèm và máy ảo sinh viên trên Proxmox"""
     import os
     from app.models import Submission
-    from app.services.vm_service import get_pve_client, control_student_vm
+    from app.services.vm_service import delete_lab_groups
 
     lab = db.query(Lab).filter(Lab.id == lab_id).first()
     if not lab:
@@ -332,6 +338,12 @@ def delete_lab(
         class_exists = db.query(Class).filter(Class.id == lab.class_id).first()
         if not class_exists or current_user not in class_exists.users:
             raise HTTPException(status_code=403, detail="Bạn không quản lý lớp chứa bài lab này")
+
+    # Native cleanup must finish before deleting the lab/configuration records.
+    try:
+        delete_lab_groups(lab_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Không thể xoá group của bài lab: {exc}") from exc
 
     # 1. Xóa an toàn các file vật lý đính kèm của bài lab này và các bài nộp thuộc lab này
     # CHỈ xóa file trên ổ đĩa nếu không còn bất kỳ bài lab hoặc bài nộp nào khác tham chiếu đến file đó (ví dụ trường hợp bài lab được clone)
@@ -384,28 +396,17 @@ def delete_lab(
     except Exception as e:
         logger.warning(f"Error removing exam workspace folder for lab {lab_id}: {e}")
 
-    # 2. Thu dọn và xóa hoàn toàn các máy ảo (VM) sinh viên thuộc lab này trên Proxmox
-    proxmox = get_pve_client()
-    if proxmox:
+    # Clean each machine's ISO using the old best-effort artifact cleanup behavior.
+    for configuration in lab.vms:
         try:
-            resources = proxmox.cluster.resources.get(type="vm")
-            for res in resources:
-                vm_name = res.get("name", "")
-                vmid = int(res.get("vmid", -1))
-                if vm_name == f"lab-{lab_id}" or vm_name.startswith(f"lab-{lab_id}-"):
-                    try:
-                        control_student_vm(vmid, "purge")
-                    except Exception:
-                        pass
+            from app.services.iso_tool_service import IsoToolService
+            IsoToolService.build_lab_iso(lab_id, configuration.id, [])
         except Exception:
             pass
-
-    # 3. Thu dọn file ISO custom của lab nếu có
-    try:
-        from app.services.iso_tool_service import IsoToolService
-        IsoToolService.build_lab_iso(lab_id, [])
-    except Exception:
-        pass
+    # These definitions are already loaded through lab.vms; delete via the ORM
+    # so parent deletion does not try to null references to bulk-deleted rows.
+    for configuration in list(lab.vms):
+        db.delete(configuration)
 
     db.delete(lab)
     db.commit()
@@ -477,32 +478,25 @@ def clone_lab(
         created_by_id=current_user.id,
         is_active=source_lab.is_active,
         enable_vm=source_lab.enable_vm,
-        template_vmid=source_lab.template_vmid,
-        is_linked_clone=source_lab.is_linked_clone,
-        vm_protocol=source_lab.vm_protocol,
-        vm_port=source_lab.vm_port,
-        vm_username=source_lab.vm_username,
-        vm_password=source_lab.vm_password,
-        vm_drive_mode=source_lab.vm_drive_mode,
-        vm_drive_files=source_lab.vm_drive_files or [],
         disable_vm_copy=getattr(source_lab, 'disable_vm_copy', False),
         disable_vm_paste=getattr(source_lab, 'disable_vm_paste', False),
         is_exam_mode=getattr(source_lab, 'is_exam_mode', False),
-        cpu_cores=getattr(source_lab, 'cpu_cores', None),
-        ram_mb=getattr(source_lab, 'ram_mb', None),
     )
+    cloned_lab.vms = [LabVM(**{key: getattr(configuration, key) for key in (
+        "template_vmid", "is_linked_clone", "vm_protocol", "vm_port", "vm_username", "vm_password",
+        "vm_drive_mode", "vm_drive_files", "cpu_cores", "ram_mb")}) for configuration in source_lab.vms]
     db.add(cloned_lab)
     db.commit()
     db.refresh(cloned_lab)
 
-    # Nếu bài lab gốc có cấu hình ổ đĩa tùy chọn (custom drive files), tự động build ISO lab-{id}.iso cho bài lab mới
-    if cloned_lab.vm_drive_mode == "custom" and cloned_lab.vm_drive_files:
-        try:
-            from app.services.iso_tool_service import IsoToolService
-            IsoToolService.build_lab_iso(cloned_lab.id, cloned_lab.vm_drive_files)
-            logger.info(f"[LABS] Custom ISO lab-{cloned_lab.id}.iso successfully built for Cloned Lab {cloned_lab.id}")
-        except Exception as e:
-            logger.error(f"[LABS] Failed to build custom lab ISO for Cloned Lab {cloned_lab.id}: {e}")
+    for configuration in cloned_lab.vms:
+        if configuration.vm_drive_mode == "custom" and configuration.vm_drive_files:
+            try:
+                from app.services.iso_tool_service import IsoToolService
+                IsoToolService.build_lab_iso(cloned_lab.id, configuration.id, configuration.vm_drive_files)
+                logger.info(f"[LABS] Custom ISO built for Cloned Lab {cloned_lab.id}, configuration {configuration.id}")
+            except Exception as e:
+                logger.error(f"[LABS] Failed to build custom lab ISO for Cloned Lab {cloned_lab.id}: {e}")
 
     log = AuditLog(
         user_id=current_user.id,
@@ -811,73 +805,58 @@ def get_or_create_vm_session(
     current_user: User = Depends(require_any_user)
 ):
     """API Sinh máy ảo cho sinh viên và trả về URL nhúng Apache Guacamole (HMAC)"""
+    from app.services.vm_service import VMProvisionError, provision_student_vm, generate_guacamole_auth_json_url
     lab = db.query(Lab).filter(Lab.id == lab_id).first()
     if not lab:
         raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
         
     if not lab.enable_vm:
         raise HTTPException(status_code=400, detail="Bài lab này không yêu cầu máy ảo thực hành")
-    if lab.vm_protocol in {"rdp", "ssh"} and not lab.vm_username:
-        raise HTTPException(status_code=400, detail="Lab chưa cấu hình tên đăng nhập VM")
-    if not lab.vm_password:
-        raise HTTPException(status_code=400, detail="Lab chưa cấu hình mật khẩu VM")
-        
-    from app.services.vm_service import (
-        VMProvisionError,
-        provision_student_vm,
-        generate_guacamole_auth_json_url,
-    )
-
-    template_vmid = lab.template_vmid or settings.DEFAULT_TEMPLATE_VMID
-    is_linked = getattr(lab, 'is_linked_clone', True)
-    if is_linked is None:
-        is_linked = True
-    # Xác định file ISO gắn vào ổ D: của máy ảo (Custom Lab ISO vs Default tools-1001.iso)
-    iso_filename = None
-    if getattr(lab, 'vm_drive_mode', 'default') == 'custom' and getattr(lab, 'vm_drive_files', None):
-        from app.services.iso_tool_service import IsoToolService
-        iso_filename = IsoToolService.get_lab_iso_basename(lab.id)
-
+    definitions = sorted(lab.vms, key=lambda item: item.id)
+    if not definitions:
+        raise HTTPException(status_code=400, detail="Lab chưa cấu hình máy ảo")
+    vm_configs = []
+    for configuration in definitions:
+        if configuration.vm_protocol in {"rdp", "ssh"} and not configuration.vm_username:
+            raise HTTPException(status_code=400, detail="Lab chưa cấu hình tên đăng nhập VM")
+        if not configuration.vm_password:
+            raise HTTPException(status_code=400, detail="Lab chưa cấu hình mật khẩu VM")
+        iso_filename = None
+        if configuration.vm_drive_mode == "custom" and configuration.vm_drive_files:
+            from app.services.iso_tool_service import IsoToolService
+            iso_filename = IsoToolService.get_lab_iso_basename(lab.id, configuration.id)
+        vm_configs.append(dict(
+            lab_vm_id=configuration.id, template_vmid=configuration.template_vmid,
+            protocol=configuration.vm_protocol, port=configuration.vm_port,
+            is_linked_clone=configuration.is_linked_clone, iso_filename=iso_filename,
+            cpu_cores=configuration.cpu_cores, ram_mb=configuration.ram_mb))
     try:
-        ip_address, vmid = provision_student_vm(
-            student_username=current_user.username,
-            lab_id=lab.id,
-            template_vmid=template_vmid,
-            protocol=lab.vm_protocol,
-            port=lab.vm_port,
-            is_linked_clone=is_linked,
-            iso_filename=iso_filename,
-            cpu_cores=getattr(lab, 'cpu_cores', None),
-            ram_mb=getattr(lab, 'ram_mb', None),
-            is_exam_mode=getattr(lab, 'is_exam_mode', False),
-        )
+        provisioned = provision_student_vm(
+            student_username=current_user.username, lab_id=lab.id,
+            vm_configs=vm_configs, is_exam_mode=getattr(lab, "is_exam_mode", False))
     except VMProvisionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    print(f"[VM-SESSION] user={current_user.username} lab={lab_id} vmid={vmid} ip={ip_address} iso={iso_filename or 'default'}", flush=True)
-    
-    guacamole_url = generate_guacamole_auth_json_url(
-        ip_address=ip_address,
-        student_username=current_user.username,
-        protocol=lab.vm_protocol,
-        port=lab.vm_port,
-        username=lab.vm_username,
-        password=lab.vm_password,
-        disable_vm_copy=getattr(lab, 'disable_vm_copy', False),
-        disable_vm_paste=getattr(lab, 'disable_vm_paste', False),
-        is_exam_mode=getattr(lab, 'is_exam_mode', False),
-    )
-
-
-    
-    return {
-        "status": "ready",
-        "vmid": vmid,
-        "ip_address": ip_address,
-        "guacamole_url": guacamole_url,
-        "template_vmid": template_vmid,
-        "protocol": lab.vm_protocol,
-        "port": lab.vm_port
-    }
+    sessions = []
+    for configuration, config, (ip_address, vmid) in zip(definitions, vm_configs, provisioned):
+        print(f"[VM-SESSION] user={current_user.username} lab={lab_id} vmid={vmid} ip={ip_address} "
+              f"iso={config['iso_filename'] or 'default'}", flush=True)
+        guacamole_url = generate_guacamole_auth_json_url(
+            ip_address=ip_address, student_username=current_user.username, lab_vm_id=configuration.id,
+            protocol=configuration.vm_protocol, port=configuration.vm_port,
+            username=configuration.vm_username, password=configuration.vm_password,
+            disable_vm_copy=getattr(lab, "disable_vm_copy", False),
+            disable_vm_paste=getattr(lab, "disable_vm_paste", False),
+            is_exam_mode=getattr(lab, "is_exam_mode", False))
+        sessions.append({
+            "lab_vm_id": configuration.id, "vmid": vmid, "ip_address": ip_address,
+            "guacamole_url": guacamole_url, "template_vmid": configuration.template_vmid,
+            "protocol": configuration.vm_protocol, "port": configuration.vm_port})
+    result = {"status": "ready", "vms": sessions}
+    # Additive compatibility for the existing one-machine frontend; never pick a
+    # representative scalar VM for a multi-machine group.
+    if len(sessions) == 1:
+        result.update({key: value for key, value in sessions[0].items() if key != "lab_vm_id"})
+    return result
 
 @router.post("/{lab_id}/vm-rollback")
 def rollback_vm_session(
@@ -904,6 +883,7 @@ def rollback_vm_session(
 @router.post("/{lab_id}/vm-screenshot")
 def take_vm_screenshot(
     lab_id: int,
+    lab_vm_id: int = Query(..., gt=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_user)
 ):
@@ -918,6 +898,10 @@ def take_vm_screenshot(
     if not lab.enable_vm:
         raise HTTPException(status_code=400, detail="Bài lab này không kích hoạt máy ảo")
 
+    configuration = next((item for item in lab.vms if item.id == lab_vm_id), None)
+    if configuration is None:
+        raise HTTPException(status_code=404, detail="Cấu hình máy không thuộc bài lab")
+
     from app.services.vm_service import get_pve_client, _find_student_vm, save_vm_screenshot_to_desktop
     proxmox = get_pve_client()
     if not proxmox:
@@ -928,12 +912,12 @@ def take_vm_screenshot(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Lỗi kiểm tra máy ảo Proxmox: {str(exc)}")
 
-    existing_vm = _find_student_vm(resources, current_user.username, lab.id)
+    existing_vm = _find_student_vm(resources, current_user.username, lab.id, lab_vm_id)
     if not existing_vm or existing_vm.get("status") != "running":
         raise HTTPException(status_code=400, detail="Máy ảo của bạn chưa được khởi động hoặc đang tắt")
 
     vmid = int(existing_vm["vmid"])
-    is_windows = (lab.vm_protocol == "rdp")
+    is_windows = (configuration.vm_protocol == "rdp")
 
     try:
         result = save_vm_screenshot_to_desktop(vmid=vmid, is_windows=is_windows)
@@ -944,6 +928,7 @@ def take_vm_screenshot(
 @router.post("/{lab_id}/vm-exam-submit")
 def submit_exam_from_vm(
     lab_id: int,
+    lab_vm_id: int = Query(..., gt=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_student)
 ):
@@ -960,6 +945,10 @@ def submit_exam_from_vm(
     if not lab.enable_vm:
         raise HTTPException(status_code=400, detail="This lab does not have a virtual machine enabled")
 
+    configuration = next((item for item in lab.vms if item.id == lab_vm_id), None)
+    if configuration is None:
+        raise HTTPException(status_code=404, detail="Cấu hình máy không thuộc bài lab")
+
     from app.services.vm_service import get_pve_client, _find_student_vm, backup_vm_workspace
     from app.models import Submission, AuditLog
     import shutil
@@ -973,7 +962,7 @@ def submit_exam_from_vm(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed checking Proxmox virtual machines: {str(exc)}")
 
-    existing_vm = _find_student_vm(resources, current_user.username, lab.id)
+    existing_vm = _find_student_vm(resources, current_user.username, lab.id, lab_vm_id)
     if not existing_vm or existing_vm.get("status") != "running":
         raise HTTPException(
             status_code=400,
@@ -981,7 +970,7 @@ def submit_exam_from_vm(
         )
 
     vmid = int(existing_vm["vmid"])
-    backup_file = backup_vm_workspace(vmid, current_user.username, lab.id)
+    backup_file = backup_vm_workspace(vmid, current_user.username, lab.id, lab_vm_id)
     if not backup_file or not os.path.exists(backup_file):
         raise HTTPException(
             status_code=400,
@@ -995,7 +984,7 @@ def submit_exam_from_vm(
     sub_dir = os.path.join(settings.UPLOAD_DIR, "submissions", f"lab_{lab.id}")
     os.makedirs(sub_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    official_filename = f"Exam_Submission_{current_user.username}_{ts}.zip"
+    official_filename = f"Exam_Submission_{current_user.username}_vm_{lab_vm_id}_{ts}.zip"
     official_filepath = os.path.join(sub_dir, official_filename)
     shutil.copy2(backup_file, official_filepath)
 
@@ -1010,13 +999,14 @@ def submit_exam_from_vm(
             if docx_candidates:
                 target_docx = docx_candidates[0]
                 docx_name = os.path.basename(target_docx)
-                extracted_docx_name = f"Report_{current_user.username}_{ts}_{docx_name}"
+                extracted_docx_name = f"Report_{current_user.username}_vm_{lab_vm_id}_{ts}_{docx_name}"
                 extracted_docx_path = os.path.join(sub_dir, extracted_docx_name)
                 with zf.open(target_docx) as source, open(extracted_docx_path, "wb") as target:
                     shutil.copyfileobj(source, target)
 
                 docx_found = {
                     "field_id": "exam_report_docx",
+                    "lab_vm_id": lab_vm_id,
                     "original_filename": docx_name,
                     "saved_filename": extracted_docx_name,
                     "filepath": extracted_docx_path,
@@ -1029,6 +1019,7 @@ def submit_exam_from_vm(
     # File zip toàn bộ workspace
     new_attachments.append({
         "field_id": "exam_workspace",
+        "lab_vm_id": lab_vm_id,
         "original_filename": official_filename,
         "saved_filename": official_filename,
         "filepath": official_filepath,
@@ -1055,7 +1046,7 @@ def submit_exam_from_vm(
         db.add(submission)
     else:
         current_attachments = list(submission.file_attachments or [])
-        merged_attachments = new_attachments + [a for a in current_attachments if a.get("field_id") not in ("exam_report_docx", "exam_workspace")]
+        merged_attachments = new_attachments + [a for a in current_attachments if not (a.get("field_id") in ("exam_report_docx", "exam_workspace") and a.get("lab_vm_id") == lab_vm_id)]
         submission.file_attachments = merged_attachments
         current_answers = dict(submission.answers or {})
         current_answers["exam_workspace"] = report_desc

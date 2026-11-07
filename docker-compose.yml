@@ -60,7 +60,6 @@ services:
       PVE_API_USER: "${PVE_API_USER:?PVE_API_USER is required}"
       PVE_TOKEN_NAME: "${PVE_TOKEN_NAME:?PVE_TOKEN_NAME is required}"
       PVE_TOKEN_VALUE: "${PVE_TOKEN_VALUE:?PVE_TOKEN_VALUE is required}"
-      PVE_NODE: "${PVE_NODE:?PVE_NODE is required}"
       PVE_VERIFY_SSL: "${PVE_VERIFY_SSL:?PVE_VERIFY_SSL is required}"
       TEMPLATE_VMID_MIN: "${TEMPLATE_VMID_MIN:?TEMPLATE_VMID_MIN is required}"
       TEMPLATE_VMID_MAX: "${TEMPLATE_VMID_MAX:?TEMPLATE_VMID_MAX is required}"

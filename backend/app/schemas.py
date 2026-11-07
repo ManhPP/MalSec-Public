@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator, model_serializer
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime
 from app.config import settings
@@ -194,6 +194,37 @@ class SemesterOut(SemesterBase):
         from_attributes = True
 
 # --- LAB SCHEMAS ---
+class LabVMEditable(BaseModel):
+    cpu_cores: Optional[int] = None
+    ram_mb: Optional[int] = None
+    vm_protocol: Optional[Literal["rdp", "vnc", "ssh"]] = None
+    vm_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    vm_username: Optional[str] = None
+    vm_drive_mode: Optional[Literal["default", "custom"]] = "default"
+    vm_drive_files: Optional[List[str]] = Field(default_factory=list)
+
+class LabVMCreate(LabVMEditable):
+    template_vmid: int
+    is_linked_clone: Optional[bool] = True
+    vm_protocol: Literal["rdp", "vnc", "ssh"] = settings.DEFAULT_VM_PROTOCOL
+    vm_port: int = Field(default=settings.DEFAULT_VM_PORT, ge=1, le=65535)
+    vm_password: Optional[str] = Field(default=None, min_length=1)
+
+class LabVMUpdate(LabVMEditable):
+    id: int
+    vm_password: Optional[str] = Field(default=None, min_length=1)
+
+    class Config:
+        extra = "forbid"
+
+class LabVMOut(LabVMEditable):
+    id: int
+    template_vmid: int
+    is_linked_clone: bool
+
+    class Config:
+        from_attributes = True
+
 class LabBase(BaseModel):
     title: str
     description: Optional[str] = None
@@ -209,6 +240,9 @@ class LabBase(BaseModel):
     individual_extensions: Optional[Dict[str, str]] = {}
     is_active: Optional[bool] = True
     enable_vm: Optional[bool] = True
+    disable_vm_copy: Optional[bool] = False
+    disable_vm_paste: Optional[bool] = False
+    is_exam_mode: Optional[bool] = False
     template_vmid: Optional[int] = settings.DEFAULT_TEMPLATE_VMID
     is_linked_clone: Optional[bool] = True
     vm_protocol: Literal["rdp", "vnc", "ssh"] = settings.DEFAULT_VM_PROTOCOL
@@ -216,17 +250,26 @@ class LabBase(BaseModel):
     vm_username: Optional[str] = None
     vm_drive_mode: Optional[Literal["default", "custom"]] = "default"
     vm_drive_files: Optional[List[str]] = []
-    disable_vm_copy: Optional[bool] = False
-    disable_vm_paste: Optional[bool] = False
-    is_exam_mode: Optional[bool] = False
     cpu_cores: Optional[int] = None
     ram_mb: Optional[int] = None
+    vms: List[LabVMCreate] = Field(default_factory=list)
     class_id: int
 
 class LabCreate(LabBase):
     vm_password: Optional[str] = Field(default=None, min_length=1)
 
 class LabUpdate(BaseModel):
+    template_vmid: Optional[int] = None
+    is_linked_clone: Optional[bool] = None
+    vm_protocol: Optional[Literal["rdp", "vnc", "ssh"]] = None
+    vm_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    vm_username: Optional[str] = None
+    vm_password: Optional[str] = Field(default=None, min_length=1)
+    vm_drive_mode: Optional[Literal["default", "custom"]] = None
+    vm_drive_files: Optional[List[str]] = None
+    cpu_cores: Optional[int] = None
+    ram_mb: Optional[int] = None
+    vms: Optional[List[LabVMUpdate]] = None
     title: Optional[str] = None
     description: Optional[str] = None
     grade_tag: Optional[str] = None
@@ -237,19 +280,9 @@ class LabUpdate(BaseModel):
     individual_extensions: Optional[Dict[str, str]] = None
     is_active: Optional[bool] = None
     enable_vm: Optional[bool] = None
-    template_vmid: Optional[int] = None
-    is_linked_clone: Optional[bool] = None
-    vm_protocol: Optional[Literal["rdp", "vnc", "ssh"]] = None
-    vm_port: Optional[int] = Field(default=None, ge=1, le=65535)
-    vm_username: Optional[str] = None
-    vm_password: Optional[str] = Field(default=None, min_length=1)
-    vm_drive_mode: Optional[Literal["default", "custom"]] = None
-    vm_drive_files: Optional[List[str]] = None
     disable_vm_copy: Optional[bool] = None
     disable_vm_paste: Optional[bool] = None
     is_exam_mode: Optional[bool] = None
-    cpu_cores: Optional[int] = None
-    ram_mb: Optional[int] = None
     class_id: Optional[int] = None
 
 class LabClone(BaseModel):
@@ -260,9 +293,35 @@ class LabClone(BaseModel):
 
 
 class LabOut(LabBase):
+    vms: List[LabVMOut] = Field(default_factory=list)
     id: int
     created_by_id: int
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_machine_configuration(cls, value: Any) -> Any:
+        """Expose the old flat fields as a view of a single definition, not duplicated DB state."""
+        if isinstance(value, dict):
+            return value
+        result = {column.name: getattr(value, column.name) for column in value.__table__.columns}
+        definitions = sorted(value.vms, key=lambda item: item.id)
+        result["vms"] = definitions
+        if len(definitions) == 1:
+            for key in ("template_vmid", "is_linked_clone", "vm_protocol", "vm_port",
+                        "vm_username", "vm_drive_mode", "vm_drive_files", "cpu_cores", "ram_mb"):
+                result[key] = getattr(definitions[0], key)
+        return result
+
+    @model_serializer(mode="wrap")
+    def serialize_lab(self, handler: Any) -> Dict[str, Any]:
+        """Multiple definitions have no unambiguous legacy scalar configuration."""
+        result = handler(self)
+        if len(self.vms) > 1:
+            for key in ("template_vmid", "is_linked_clone", "vm_protocol", "vm_port",
+                        "vm_username", "vm_drive_mode", "vm_drive_files", "cpu_cores", "ram_mb"):
+                result.pop(key, None)
+        return result
 
     class Config:
         from_attributes = True

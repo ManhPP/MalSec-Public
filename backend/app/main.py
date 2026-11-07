@@ -20,18 +20,26 @@ setup_logging()
 for i in range(5):
     try:
         Base.metadata.create_all(bind=engine)
-        # Migration an toàn: Tự động bổ sung cột grade_tag vào bảng labs nếu chưa có
+        # Dev schema transition only: discard legacy per-VM lab configuration.
+        # No data is copied; machine definitions must be created in lab_vms.
+        # Ownership now uses naming/inventory; the old mapping FK must not
+        # prevent deletion of lab_vms after the mapping model was removed.
         with engine.connect() as conn:
             from sqlalchemy import text
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS grade_tag VARCHAR;"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS attachment_files JSONB DEFAULT '[]'::jsonb;"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_drive_mode VARCHAR DEFAULT 'default';"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_drive_files JSONB DEFAULT '[]'::jsonb;"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS disable_vm_copy BOOLEAN DEFAULT FALSE;"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS disable_vm_paste BOOLEAN DEFAULT FALSE;"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS is_exam_mode BOOLEAN DEFAULT FALSE;"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS cpu_cores INTEGER;"))
-            conn.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS ram_mb INTEGER;"))
+            conn.execute(text("""
+                DROP TABLE IF EXISTS lab_vms_instances;
+                ALTER TABLE labs
+                    DROP COLUMN IF EXISTS template_vmid,
+                    DROP COLUMN IF EXISTS is_linked_clone,
+                    DROP COLUMN IF EXISTS cpu_cores,
+                    DROP COLUMN IF EXISTS ram_mb,
+                    DROP COLUMN IF EXISTS vm_protocol,
+                    DROP COLUMN IF EXISTS vm_port,
+                    DROP COLUMN IF EXISTS vm_username,
+                    DROP COLUMN IF EXISTS vm_password,
+                    DROP COLUMN IF EXISTS vm_drive_mode,
+                    DROP COLUMN IF EXISTS vm_drive_files;
+            """))
             conn.execute(text("ALTER TABLE classes ADD COLUMN IF NOT EXISTS semester VARCHAR DEFAULT 'unknown';"))
             conn.execute(text("ALTER TABLE classes ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;"))
             conn.execute(text("UPDATE classes SET semester = 'unknown' WHERE semester IS NULL;"))
@@ -205,40 +213,6 @@ def read_root():
 def seed_data():
     db = SessionLocal()
     try:
-        # Auto-migration: Ensure template_vmid columns exist
-        try:
-            from sqlalchemy import text
-            db.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS template_vmid INTEGER;"))
-            db.execute(
-                text("UPDATE labs SET template_vmid = :value WHERE template_vmid IS NULL"),
-                {"value": settings.DEFAULT_TEMPLATE_VMID},
-            )
-            db.execute(text("ALTER TABLE labs ALTER COLUMN template_vmid DROP DEFAULT;"))
-            db.execute(text("ALTER TABLE labs ALTER COLUMN template_vmid SET NOT NULL;"))
-            db.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_protocol VARCHAR;"))
-            db.execute(
-                text("UPDATE labs SET vm_protocol = :value WHERE vm_protocol IS NULL"),
-                {"value": settings.DEFAULT_VM_PROTOCOL},
-            )
-            db.execute(text("ALTER TABLE labs ALTER COLUMN vm_protocol DROP DEFAULT;"))
-            db.execute(text("ALTER TABLE labs ALTER COLUMN vm_protocol SET NOT NULL;"))
-            db.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_port INTEGER;"))
-            db.execute(
-                text("UPDATE labs SET vm_port = :value WHERE vm_port IS NULL"),
-                {"value": settings.DEFAULT_VM_PORT},
-            )
-            db.execute(text("ALTER TABLE labs ALTER COLUMN vm_port DROP DEFAULT;"))
-            db.execute(text("ALTER TABLE labs ALTER COLUMN vm_port SET NOT NULL;"))
-            db.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_username VARCHAR;"))
-            db.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS vm_password VARCHAR;"))
-            db.execute(text("ALTER TABLE labs ADD COLUMN IF NOT EXISTS is_linked_clone BOOLEAN DEFAULT TRUE;"))
-            db.execute(text("UPDATE labs SET is_linked_clone = TRUE WHERE is_linked_clone IS NULL;"))
-            db.execute(text("ALTER TABLE labs ALTER COLUMN is_linked_clone SET NOT NULL;"))
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            print(f"Auto migration template_vmid / is_linked_clone: {e}")
-
         # Initialize admin account on empty database
         user_count = db.query(User).count()
 
