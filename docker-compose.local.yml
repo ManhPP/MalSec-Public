@@ -12,7 +12,7 @@ services:
     ports:
       - "127.0.0.1:${DB_HOST_PORT:?DB_HOST_PORT is required}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # - postgres_data:/var/lib/postgresql/data
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     healthcheck:
@@ -61,6 +61,9 @@ services:
       PVE_TOKEN_NAME: "${PVE_TOKEN_NAME:?PVE_TOKEN_NAME is required}"
       PVE_TOKEN_VALUE: "${PVE_TOKEN_VALUE:?PVE_TOKEN_VALUE is required}"
       PVE_VERIFY_SSL: "${PVE_VERIFY_SSL:?PVE_VERIFY_SSL is required}"
+      PVE_SSH_HOST: "${PVE_SSH_HOST:?PVE_SSH_HOST is required}"
+      PVE_SSH_USER: "${PVE_SSH_USER:?PVE_SSH_USER is required}"
+      PVE_SSH_KEY: "${PVE_SSH_KEY:?PVE_SSH_KEY is required}"
       TEMPLATE_VMID_MIN: "${TEMPLATE_VMID_MIN:?TEMPLATE_VMID_MIN is required}"
       TEMPLATE_VMID_MAX: "${TEMPLATE_VMID_MAX:?TEMPLATE_VMID_MAX is required}"
       STUDENT_VMID_MIN: "${STUDENT_VMID_MIN:?STUDENT_VMID_MIN is required}"
@@ -88,8 +91,8 @@ services:
       GUAC_RDP_ENABLE_DESKTOP_COMPOSITION: "${GUAC_RDP_ENABLE_DESKTOP_COMPOSITION:?GUAC_RDP_ENABLE_DESKTOP_COMPOSITION is required}"
       GUAC_SSH_IGNORE_HOST_KEY: "${GUAC_SSH_IGNORE_HOST_KEY:?GUAC_SSH_IGNORE_HOST_KEY is required}"
     volumes:
-      - student_uploads:/app/uploads
-
+      # - student_uploads:/app/uploads
+      - ./ssh:/root/.ssh:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     depends_on:
@@ -107,7 +110,7 @@ services:
         VITE_DEV_PORT: "${VITE_DEV_PORT:?VITE_DEV_PORT is required}"
         VITE_API_PROXY_TARGET: "${VITE_API_PROXY_TARGET:?VITE_API_PROXY_TARGET is required}"
         VITE_API_PROXY_SECURE: "${VITE_API_PROXY_SECURE:?VITE_API_PROXY_SECURE is required}"
-    image: malsec-frontend:1.0.2
+    image: malsec-frontend:1.0.3
     container_name: malsec-frontend
     restart: always
     environment:
@@ -151,10 +154,6 @@ services:
       - guacd
     networks:
       - malsec-network
-
-volumes:
-  postgres_data:
-  student_uploads:
 
 networks:
   malsec-network:

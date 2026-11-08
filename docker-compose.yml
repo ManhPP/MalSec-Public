@@ -58,6 +58,9 @@ services:
       PVE_TOKEN_NAME: "${PVE_TOKEN_NAME:?PVE_TOKEN_NAME is required}"
       PVE_TOKEN_VALUE: "${PVE_TOKEN_VALUE:?PVE_TOKEN_VALUE is required}"
       PVE_VERIFY_SSL: "${PVE_VERIFY_SSL:?PVE_VERIFY_SSL is required}"
+      PVE_SSH_HOST: "${PVE_SSH_HOST:?PVE_SSH_HOST is required}"
+      PVE_SSH_USER: "${PVE_SSH_USER:?PVE_SSH_USER is required}"
+      PVE_SSH_KEY: "${PVE_SSH_KEY:?PVE_SSH_KEY is required}"
       TEMPLATE_VMID_MIN: "${TEMPLATE_VMID_MIN:?TEMPLATE_VMID_MIN is required}"
       TEMPLATE_VMID_MAX: "${TEMPLATE_VMID_MAX:?TEMPLATE_VMID_MAX is required}"
       STUDENT_VMID_MIN: "${STUDENT_VMID_MIN:?STUDENT_VMID_MIN is required}"
@@ -86,7 +89,7 @@ services:
       GUAC_SSH_IGNORE_HOST_KEY: "${GUAC_SSH_IGNORE_HOST_KEY:?GUAC_SSH_IGNORE_HOST_KEY is required}"
     volumes:
       # - student_uploads:/app/uploads
-
+      - ./ssh:/root/.ssh:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     depends_on:
@@ -96,7 +99,7 @@ services:
       - malsec-network
 
   frontend:
-    image: chiennc4805/malsec-frontend:1.0.2
+    image: chiennc4805/malsec-frontend:1.0.3
     container_name: malsec-frontend
     restart: always
     environment:
