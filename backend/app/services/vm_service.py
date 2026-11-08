@@ -552,6 +552,45 @@ def get_guacamole_secret_bytes(secret_str: str) -> bytes:
             pass
     return secret_str.encode('utf-8')
 
+def _guacamole_connection(
+    ip_address: str,
+    protocol: str,
+    port: int,
+    username: str | None,
+    password: str | None,
+    disable_vm_copy: bool,
+    disable_vm_paste: bool,
+    is_exam_mode: bool,
+) -> Dict[str, Any]:
+    """Giữ cấu hình giao thức/clipboard hiện có cho từng connection Guacamole."""
+    protocol = protocol.lower()
+    if protocol not in {"rdp", "vnc", "ssh"}:
+        raise ValueError(f"Unsupported Guacamole protocol: {protocol}")
+    parameters = {"hostname": ip_address, "port": str(port)}
+    if username:
+        parameters["username"] = username
+    if password:
+        parameters["password"] = password
+    if protocol == "rdp":
+        parameters.update({
+            "ignore-cert": str(settings.GUAC_RDP_IGNORE_CERT).lower(),
+            "security": settings.GUAC_RDP_SECURITY,
+            "server-layout": settings.GUAC_RDP_SERVER_LAYOUT,
+            "enable-wallpaper": str(settings.GUAC_RDP_ENABLE_WALLPAPER).lower(),
+            "enable-theming": str(settings.GUAC_RDP_ENABLE_THEMING).lower(),
+            "enable-font-smoothing": str(settings.GUAC_RDP_ENABLE_FONT_SMOOTHING).lower(),
+            "enable-full-window-drag": str(settings.GUAC_RDP_ENABLE_FULL_WINDOW_DRAG).lower(),
+            "enable-menu-animations": str(settings.GUAC_RDP_ENABLE_MENU_ANIMATIONS).lower(),
+            "enable-desktop-composition": str(settings.GUAC_RDP_ENABLE_DESKTOP_COMPOSITION).lower(),
+            "disable-copy": "true" if disable_vm_copy or is_exam_mode else "false",
+            "disable-paste": "true" if disable_vm_paste or is_exam_mode else "false",
+            "server-keepalive": "10",
+        })
+    elif protocol == "ssh":
+        parameters["ignore-host-key"] = str(settings.GUAC_SSH_IGNORE_HOST_KEY).lower()
+    return {"protocol": protocol, "parameters": parameters}
+
+
 def generate_guacamole_auth_json_url(
     ip_address: str, 
     student_username: str,
@@ -563,6 +602,9 @@ def generate_guacamole_auth_json_url(
     disable_vm_copy: bool = False,
     disable_vm_paste: bool = False,
     is_exam_mode: bool = False,
+    *,
+    connections: Optional[Dict[str, Any]] = None,
+    session_ts: Optional[int] = None,
 ) -> str:
     """
     Sinh URL kết nối Apache Guacamole mã hóa theo chuẩn guacamole-auth-json (Encrypted JSON Authentication v1.6.0).
@@ -571,7 +613,7 @@ def generate_guacamole_auth_json_url(
     2. signature = HMAC-SHA256(key, json_bytes) (32 bytes)
     3. raw_payload = signature (32B) + json_bytes
     4. ciphertext = AES-CBC-Encrypt(key, NULL_IV, PKCS7(raw_payload))
-    5. URL = /#/client/{connection_name}?data=urllib.parse.quote(Base64(ciphertext))
+    5. URL dùng identifier Base64URL(name + NUL + c + NUL + json) của Guacamole.
     """
     secret_str = settings.GUAC_JSON_SECRET.strip()
     key = get_guacamole_secret_bytes(secret_str)
@@ -579,61 +621,17 @@ def generate_guacamole_auth_json_url(
         key = hashlib.sha256(key).digest()
     
     expires_ms = int((time.time() + settings.GUAC_SESSION_TTL_SECONDS) * 1000)
-    session_ts = int(time.time())  # Timestamp để tạo connection_name duy nhất mỗi phiên
+    session_ts = int(time.time()) if session_ts is None else session_ts
     connection_name = f"Lab-VM-{student_username}-{lab_vm_id}-{session_ts}"
     
 
-    protocol = protocol.lower()
-    if protocol not in {"rdp", "vnc", "ssh"}:
-        raise ValueError(f"Unsupported Guacamole protocol: {protocol}")
-
-    parameters = {
-        "hostname": ip_address,
-        "port": str(port),
-    }
-    if username:
-        parameters["username"] = username
-    if password:
-        parameters["password"] = password
-    if protocol == "rdp":
-        should_disable_copy = bool(disable_vm_copy or is_exam_mode)
-        should_disable_paste = bool(disable_vm_paste or is_exam_mode)
-        parameters.update({
-            "ignore-cert": str(settings.GUAC_RDP_IGNORE_CERT).lower(),
-            "security": settings.GUAC_RDP_SECURITY,
-            "server-layout": settings.GUAC_RDP_SERVER_LAYOUT,
-            "enable-wallpaper": str(settings.GUAC_RDP_ENABLE_WALLPAPER).lower(),
-            "enable-theming": str(settings.GUAC_RDP_ENABLE_THEMING).lower(),
-            "enable-font-smoothing": str(
-                settings.GUAC_RDP_ENABLE_FONT_SMOOTHING
-            ).lower(),
-            "enable-full-window-drag": str(
-                settings.GUAC_RDP_ENABLE_FULL_WINDOW_DRAG
-            ).lower(),
-            "enable-menu-animations": str(
-                settings.GUAC_RDP_ENABLE_MENU_ANIMATIONS
-            ).lower(),
-            "enable-desktop-composition": str(
-                settings.GUAC_RDP_ENABLE_DESKTOP_COMPOSITION
-            ).lower(),
-            "disable-copy": "true" if should_disable_copy else "false",
-            "disable-paste": "true" if should_disable_paste else "false",
-            "server-keepalive": "10",
-        })
-    elif protocol == "ssh":
-        parameters.update({
-            "ignore-host-key": str(settings.GUAC_SSH_IGNORE_HOST_KEY).lower()
-        })
+    connection = _guacamole_connection(ip_address, protocol, port, username, password,
+                                      disable_vm_copy, disable_vm_paste, is_exam_mode)
 
     payload = {
         "username": student_username,
         "expires": expires_ms,
-        "connections": {
-            connection_name: {
-                "protocol": protocol,
-                "parameters": parameters
-            }
-        }
+        "connections": connections if connections is not None else {connection_name: connection}
     }
     
     json_bytes = json.dumps(payload).encode('utf-8')
@@ -660,9 +658,42 @@ def generate_guacamole_auth_json_url(
     quoted_data = urllib.parse.quote(data_b64, safe='')
     
     base_url = settings.GUAC_BASE_URL.rstrip('/')
-    url = f"{base_url}/#/client/c/{connection_name}?data={quoted_data}"
+    identifier = base64.urlsafe_b64encode(f"{connection_name}\0c\0json".encode("utf-8")).decode("ascii").rstrip("=")
+    url = f"{base_url}/#/client/{identifier}?data={quoted_data}"
     logger.info(f"[VDI] SESSION_ISSUED | User: {student_username} | Target: {ip_address}:{port} ({protocol.upper()}) | TTL: {settings.GUAC_SESSION_TTL_SECONDS}s")
     return url
+
+def generate_guacamole_auth_json_urls(
+    student_username: str,
+    vms: List[Dict[str, Any]],
+    disable_vm_copy: bool = False,
+    disable_vm_paste: bool = False,
+    is_exam_mode: bool = False,
+) -> Dict[int, str]:
+    """Sinh URL riêng từng máy, dùng chung một payload auth chứa mọi máy trong lab."""
+    if not vms:
+        return {}
+    session_ts = int(time.time())
+    names = {vm["lab_vm_id"]: f"Lab-VM-{student_username}-{vm['lab_vm_id']}-{session_ts}" for vm in vms}
+    connections = {
+        names[vm["lab_vm_id"]]: _guacamole_connection(
+            vm["ip_address"], vm["protocol"], vm["port"], vm.get("username"), vm.get("password"),
+            disable_vm_copy, disable_vm_paste, is_exam_mode)
+        for vm in vms
+    }
+    first = vms[0]
+    url = generate_guacamole_auth_json_url(
+        ip_address=first["ip_address"], student_username=student_username, lab_vm_id=first["lab_vm_id"],
+        protocol=first["protocol"], port=first["port"], username=first.get("username"), password=first.get("password"),
+        disable_vm_copy=disable_vm_copy, disable_vm_paste=disable_vm_paste, is_exam_mode=is_exam_mode,
+        connections=connections, session_ts=session_ts)
+    prefix, data = url.split("/#/client/", 1)
+    encrypted = data.split("?data=", 1)[1]
+    urls = {}
+    for vm_id, name in names.items():
+        identifier = base64.urlsafe_b64encode(f"{name}\0c\0json".encode("utf-8")).decode("ascii").rstrip("=")
+        urls[vm_id] = f"{prefix}/#/client/{identifier}?data={encrypted}"
+    return urls
 
 def rollback_student_vm(student_username: str, lab_id: int, lab_vm_id: int, is_exam_mode: bool = False) -> bool:
     """Tắt và xoá các bản VM của đúng cấu hình lab_vm_id; giữ group và máy khác."""

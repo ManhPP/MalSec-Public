@@ -805,7 +805,7 @@ def get_or_create_vm_session(
     current_user: User = Depends(require_any_user)
 ):
     """API Sinh máy ảo cho sinh viên và trả về URL nhúng Apache Guacamole (HMAC)"""
-    from app.services.vm_service import VMProvisionError, provision_student_vm, generate_guacamole_auth_json_url
+    from app.services.vm_service import VMProvisionError, provision_student_vm, generate_guacamole_auth_json_urls
     lab = db.query(Lab).filter(Lab.id == lab_id).first()
     if not lab:
         raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
@@ -840,22 +840,20 @@ def get_or_create_vm_session(
     for configuration, config, (ip_address, vmid) in zip(definitions, vm_configs, provisioned):
         print(f"[VM-SESSION] user={current_user.username} lab={lab_id} vmid={vmid} ip={ip_address} "
               f"iso={config['iso_filename'] or 'default'}", flush=True)
-        guacamole_url = generate_guacamole_auth_json_url(
-            ip_address=ip_address, student_username=current_user.username, lab_vm_id=configuration.id,
-            protocol=configuration.vm_protocol, port=configuration.vm_port,
-            username=configuration.vm_username, password=configuration.vm_password,
-            disable_vm_copy=getattr(lab, "disable_vm_copy", False),
-            disable_vm_paste=getattr(lab, "disable_vm_paste", False),
-            is_exam_mode=getattr(lab, "is_exam_mode", False))
         sessions.append({
             "lab_vm_id": configuration.id, "vmid": vmid, "ip_address": ip_address,
-            "guacamole_url": guacamole_url, "template_vmid": configuration.template_vmid,
+            "template_vmid": configuration.template_vmid,
             "protocol": configuration.vm_protocol, "port": configuration.vm_port})
+    urls = generate_guacamole_auth_json_urls(
+        student_username=current_user.username,
+        vms=[dict(session, username=configuration.vm_username, password=configuration.vm_password)
+             for configuration, session in zip(definitions, sessions)],
+        disable_vm_copy=getattr(lab, "disable_vm_copy", False),
+        disable_vm_paste=getattr(lab, "disable_vm_paste", False),
+        is_exam_mode=getattr(lab, "is_exam_mode", False))
+    for session in sessions:
+        session["guacamole_url"] = urls[session["lab_vm_id"]]
     result = {"status": "ready", "vms": sessions}
-    # Additive compatibility for the existing one-machine frontend; never pick a
-    # representative scalar VM for a multi-machine group.
-    if len(sessions) == 1:
-        result.update({key: value for key, value in sessions[0].items() if key != "lab_vm_id"})
     return result
 
 @router.post("/{lab_id}/vm-rollback")
