@@ -9,6 +9,8 @@ import {
 } from 'lucide-react'
 import { renderAsync } from 'docx-preview'
 import { useAuth } from '../App.jsx'
+import GuacamoleWorkspace from '../components/GuacamoleWorkspace'
+import { connectionUrl } from '../lib/guacamole'
 
 // --- CYBERPUNK MARKDOWN PARSER UTILITIES ---
 const renderInlineFormatting = (text) => {
@@ -358,16 +360,19 @@ export default function StudentDashboard() {
   const [vmOs, setVmOs] = useState('Lab VM — Session not initialized')
   const [vmLogs, setVmLogs] = useState(['[+] Waiting for lab VM configuration...'])
   const [runtimeConfig, setRuntimeConfig] = useState(null)
-  const [guacamoleUrl, setGuacamoleUrl] = useState('')
+  const [vmSessions, setVmSessions] = useState([])
+  const [activeLabVmId, setActiveLabVmId] = useState(null)
+  const vmInfo = vmSessions.find(vm => vm.lab_vm_id === activeLabVmId) || null
+  const guacamoleUrl = vmInfo?.guacamole_url || ''
   const [vmLoading, setVmLoading] = useState(false)
   const [vmError, setVmError] = useState('')
-  const [vmInfo, setVmInfo] = useState(null)
   const [screenshotLoading, setScreenshotLoading] = useState(false)
   const [screenshotNotice, setScreenshotNotice] = useState('')
   const [examSubmitting, setExamSubmitting] = useState(false)
   const [isVmFullscreen, setIsVmFullscreen] = useState(false)
   const guacamoleFrameRef = useRef(null)
   const vmWrapperRef = useRef(null)
+  const [vmThumbnailContainer, setVmThumbnailContainer] = useState(null)
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -406,10 +411,7 @@ export default function StudentDashboard() {
   const fetchVmSession = async (labId) => {
     setVmLoading(true)
     setVmError('')
-    setGuacamoleUrl('')
-    setVmInfo(null)
-    localStorage.removeItem('GUAC_AUTH_TOKEN')
-    sessionStorage.removeItem('GUAC_AUTH_TOKEN')
+    setVmSessions([])
     const token = localStorage.getItem('malsec_token')
     try {
       const res = await fetch(`/api/labs/${labId}/vm-session`, {
@@ -429,9 +431,9 @@ export default function StudentDashboard() {
       }
 
       if (!res.ok) throw new Error(data.detail || 'Unable to create VM session')
-      setGuacamoleUrl(data.guacamole_url)
-      setVmInfo(data)
-      setVmOs(`Lab VM ${data.vmid} — ${data.protocol.toUpperCase()} — ${data.ip_address}`)
+      if (!Array.isArray(data.vms) || !data.vms.length) throw new Error('No VM sessions returned')
+      setVmSessions(data.vms)
+      setActiveLabVmId(current => data.vms.some(vm => vm.lab_vm_id === current) ? current : data.vms[0].lab_vm_id)
     } catch (err) {
       setVmError(err.message)
     } finally {
@@ -440,12 +442,12 @@ export default function StudentDashboard() {
   }
 
   const handleRollbackVm = async () => {
-    if (!selectedLab) return
+    if (!selectedLab || !vmInfo) return
     if (!confirm('Are you sure you want to revert this VM to a clean state?')) return
     setVmLoading(true)
     const token = localStorage.getItem('malsec_token')
     try {
-      const res = await fetch(`/api/labs/${selectedLab.id}/vm-rollback`, {
+      const res = await fetch(`/api/labs/${selectedLab.id}/vm-rollback?lab_vm_id=${activeLabVmId}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       })
@@ -462,8 +464,7 @@ export default function StudentDashboard() {
       }
 
       if (!res.ok) throw new Error(data.detail || 'Unable to rollback VM')
-      setGuacamoleUrl('')
-      setVmInfo(null)
+      setVmSessions([])
       await fetchVmSession(selectedLab.id)
     } catch (err) {
       alert('VM rollback error: ' + err.message)
@@ -477,7 +478,7 @@ export default function StudentDashboard() {
     setScreenshotNotice('')
     const token = localStorage.getItem('malsec_token')
     try {
-      const res = await fetch(`/api/labs/${selectedLab.id}/vm-screenshot`, {
+      const res = await fetch(`/api/labs/${selectedLab.id}/vm-screenshot?lab_vm_id=${activeLabVmId}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       })
@@ -504,7 +505,7 @@ export default function StudentDashboard() {
     setScreenshotNotice('')
     const token = localStorage.getItem('malsec_token')
     try {
-      const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit`, {
+      const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit?lab_vm_id=${activeLabVmId}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       })
@@ -1009,8 +1010,9 @@ export default function StudentDashboard() {
 
     try {
       if (selectedLab?.is_exam_mode) {
+        if (!vmInfo) throw new Error('Select a connected lab machine before submitting the exam')
         // If Exam Mode is active, collect Word docx / workspace from VM Desktop
-        const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit`, {
+        const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit?lab_vm_id=${activeLabVmId}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -2617,7 +2619,8 @@ export default function StudentDashboard() {
             
             {/* Split Left (65%): Mind-blowing Apache Guacamole RDP connection simulator */}
             {selectedLab.enable_vm !== false && (
-              <div className="split-left" style={{ height: '100%' }}>
+              <div className="split-left" style={{ height: '100%', minHeight: 0, minWidth: 0 }}>
+                <div ref={setVmThumbnailContainer} style={{ flexShrink: 0, display: vmSessions.length ? 'block' : 'none' }} />
                 <div 
                   ref={vmWrapperRef} 
                   className={`vm-screen-wrapper ${isVmFullscreen ? 'vm-fullscreen-mode' : ''}`} 
@@ -2625,6 +2628,7 @@ export default function StudentDashboard() {
                     display: 'flex', 
                     flexDirection: 'column', 
                     height: '100%',
+                    flex: '0 0 100%',
                     background: '#090d16'
                   }}
                 >
@@ -2633,7 +2637,7 @@ export default function StudentDashboard() {
                   <div className="vm-header-bar" style={isVmFullscreen ? { background: '#0f172a', borderBottom: '1px solid #334155' } : {}}>
                     <div className="vm-title">
                       <Monitor size={15} />
-                      <span>{vmOs} {isVmFullscreen && '(Full Screen)'}</span>
+                      <span>{vmInfo ? `Lab VM ${vmInfo.vmid} — ${vmInfo.protocol.toUpperCase()} — ${vmInfo.ip_address}` : vmOs} {isVmFullscreen && '(Full Screen)'}</span>
                     </div>
                     <div className="vm-actions" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <button 
@@ -2642,7 +2646,7 @@ export default function StudentDashboard() {
                         className="btn-icon" 
                         disabled={vmLoading}
                         style={{ width: '30px', height: '30px', background: '#334155', border: '1px solid #475569', color: '#f8fafc' }}
-                        title={vmLoading ? 'Initializing VM...' : 'Reload VM Session'}
+                        title={vmLoading ? 'Initializing VM...' : 'Reload all lab VM sessions'}
                       >
                         <RefreshCw size={14} className={vmLoading ? 'spin-animation' : ''} />
                       </button>
@@ -2682,7 +2686,7 @@ export default function StudentDashboard() {
 
                       {guacamoleUrl && !isVmFullscreen && (
                         <a 
-                          href={guacamoleUrl} 
+                          href={connectionUrl(guacamoleUrl)}
                           target="_blank" 
                           rel="noreferrer"
                           className="btn-icon" 
@@ -2715,8 +2719,6 @@ export default function StudentDashboard() {
 
                   {/* Real Guacamole RDP / Proxmox VM Display */}
                   <div 
-                    onClick={focusIframe}
-                    onMouseDown={focusIframe}
                     style={{ 
                       flex: 1, 
                       background: '#090d16', 
@@ -2745,17 +2747,12 @@ export default function StudentDashboard() {
                         </button>
                       </div>
                     ) : guacamoleUrl ? (
-                      <iframe 
-                        ref={guacamoleFrameRef}
-                        key={guacamoleUrl}
-                        src={guacamoleUrl} 
-                        title="Apache Guacamole Proxmox VDI Desktop"
-                        tabIndex="0"
-                        onLoad={focusIframe}
-                        onMouseEnter={focusIframe}
-                        onClick={focusIframe}
-                        style={{ width: '100%', height: '100%', border: 'none', outline: 'none' }}
-                        allow="clipboard-read; clipboard-write; fullscreen; keyboard-map"
+                      <GuacamoleWorkspace
+                        sessions={vmSessions}
+                        activeId={activeLabVmId}
+                        onSelect={setActiveLabVmId}
+                        activeFrameRef={guacamoleFrameRef}
+                        thumbnailContainer={vmThumbnailContainer}
                       />
                     ) : (
                       <div style={{ textAlign: 'center', zIndex: 1, padding: '24px' }}>
@@ -2947,7 +2944,7 @@ export default function StudentDashboard() {
                             <div key={aIdx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#ffffff', borderRadius: '6px', border: '1px solid #fbcfe8', fontSize: '12.5px' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, overflow: 'hidden' }}>
                                 <FileText size={16} style={{ color: isDocx ? '#2563eb' : isZip ? '#d97706' : '#64748b', flexShrink: 0 }} />
-                                <span style={{ fontWeight: '500', color: 'var(--text-primary)', wordBreak: 'break-all' }}>{fname}</span>
+                                <span style={{ fontWeight: '500', color: 'var(--text-primary)', wordBreak: 'break-all' }}>{att.lab_vm_id ? `[Machine #${att.lab_vm_id}] ` : ''}{fname}</span>
                                 {isDocx && <span className="badge" style={{ background: '#2563eb', color: '#fff', fontSize: '9.5px', padding: '1px 5px' }}>WORD</span>}
                               </div>
                               <div style={{ display: 'flex', gap: '6px', flexShrink: 0, marginLeft: '8px' }}>

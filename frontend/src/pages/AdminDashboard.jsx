@@ -2990,6 +2990,7 @@ export default function AdminDashboard() {
                   <thead>
                     <tr>
                       <th>Student (Username)</th>
+                      <th>Machine configuration</th>
                       <th>VMID</th>
                       <th>IP Address</th>
                       <th>Proxmox Status</th>
@@ -2999,11 +3000,12 @@ export default function AdminDashboard() {
                   </thead>
                   <tbody>
                     {studentVms.map(vm => (
-                      <tr key={vm.vmid}>
+                      <tr key={`${vm.student_username}:${vm.lab_vm_id}`}>
                         <td>
                           <div style={{ fontWeight: '600', color: 'var(--neon-cyan)' }}>{vm.student_full_name}</div>
                           <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{vm.student_username}</div>
                         </td>
+                        <td>Machine #{vm.lab_vm_id}</td>
                         <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 'bold' }}>{vm.vmid}</td>
                         <td style={{ fontFamily: 'var(--font-mono)' }}>{vm.ip_address}</td>
                         <td>
@@ -3059,7 +3061,7 @@ export default function AdminDashboard() {
                     ))}
                     {studentVms.length === 0 && (
                       <tr>
-                        <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                        <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
                           No students enrolled in this class or assigned yet.
                         </td>
                       </tr>

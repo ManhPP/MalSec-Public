@@ -6,12 +6,14 @@ import {
   ArrowLeft, Clock, Code, FileText, Image as ImageIcon, CheckCircle, RefreshCw, RotateCcw,
   School, Users, Edit2, Trash2, Search, Lock, Unlock, Filter, Monitor, Play,
   Copy, Layers, ChevronDown, ChevronRight, Eye, ExternalLink, X, FileCheck, Maximize2,
-  ChevronLeft, UserCheck, BarChart3, TrendingUp, Activity, CheckCircle2, AlertCircle,
+  ChevronLeft, UserCheck, BarChart3, TrendingUp, Activity, CheckCircle2, AlertCircle, Keyboard, Camera,
   Paperclip, Upload, HardDrive, FileArchive, Disc, Globe,
   MessageSquare, MessageCircle, CornerDownLeft, Send
 } from 'lucide-react'
 import { renderAsync } from 'docx-preview'
 import { useAuth } from '../App.jsx'
+import GuacamoleWorkspace from '../components/GuacamoleWorkspace'
+import { connectionUrl } from '../lib/guacamole'
 
 
 // --- CYBERPUNK MARKDOWN PARSER UTILITIES ---
@@ -208,6 +210,60 @@ export default function InstructorDashboard() {
   const [vmDriveFiles, setVmDriveFiles] = useState([])
   const [availableVmTools, setAvailableVmTools] = useState([])
   const [loadingVmTools, setLoadingVmTools] = useState(false)
+  const [vmDefinitions, setVmDefinitions] = useState([])
+  const [activeVmIndex, setActiveVmIndex] = useState(0)
+
+  // Reuse the existing form as the editor for one configuration at a time.
+  const readVmEditor = () => ({
+    ...vmDefinitions[activeVmIndex],
+    template_vmid: Number(templateVmid), is_linked_clone: isLinkedClone,
+    vm_protocol: vmProtocol, vm_port: Number(vmPort), vm_username: vmUsername.trim(),
+    vm_password: vmPassword, cpu_cores: cpuCores ? Number(cpuCores) : null,
+    ram_mb: ramGb ? Math.round(Number(ramGb) * 1024) : null,
+    vm_drive_mode: vmDriveMode, vm_drive_files: vmDriveMode === 'custom' ? vmDriveFiles : []
+  })
+  const currentVmDefinitions = () => vmDefinitions.map((vm, index) => index === activeVmIndex ? readVmEditor() : vm)
+  const loadVmEditor = (vm) => {
+    setTemplateVmid(vm.template_vmid || '')
+    setIsLinkedClone(vm.is_linked_clone !== false)
+    setVmProtocol(vm.vm_protocol || 'rdp')
+    setVmPort(vm.vm_port || 3389)
+    setVmUsername(vm.vm_username || '')
+    setVmPassword(vm.vm_password || '')
+    setCpuCores(vm.cpu_cores ? String(vm.cpu_cores) : '')
+    setRamGb(vm.ram_mb ? String(vm.ram_mb / 1024) : '')
+    setVmDriveMode(vm.vm_drive_mode || 'default')
+    setVmDriveFiles(vm.vm_drive_files || [])
+  }
+  const newVmDefinition = () => {
+    const protocol = runtimeConfig?.vm?.default_protocol || 'rdp'
+    return {
+      template_vmid: runtimeConfig?.vm?.default_template_vmid || pveTemplates[0]?.vmid || '',
+      is_linked_clone: true, vm_protocol: protocol,
+      vm_port: runtimeConfig?.vm?.protocol_ports?.[protocol] || 3389,
+      vm_username: '', vm_password: '', cpu_cores: null, ram_mb: null,
+      vm_drive_mode: 'default', vm_drive_files: []
+    }
+  }
+  const selectVmDefinition = (index) => {
+    const definitions = currentVmDefinitions()
+    setVmDefinitions(definitions)
+    setActiveVmIndex(index)
+    loadVmEditor(definitions[index])
+  }
+  const addVmDefinition = () => {
+    const definitions = [...currentVmDefinitions(), newVmDefinition()]
+    setVmDefinitions(definitions)
+    setActiveVmIndex(definitions.length - 1)
+    loadVmEditor(definitions[definitions.length - 1])
+  }
+  const removeVmDefinition = () => {
+    const definitions = currentVmDefinitions().filter((_, index) => index !== activeVmIndex)
+    const nextIndex = Math.min(activeVmIndex, definitions.length - 1)
+    setVmDefinitions(definitions)
+    setActiveVmIndex(nextIndex)
+    loadVmEditor(definitions[nextIndex])
+  }
   // Lecturer VM Drive D: Files State (Private Workspace or Common Drive D:)
   const [myVmTools, setMyVmTools] = useState([])
   const [myVmToolScope, setMyVmToolScope] = useState('private') // 'private' | 'common'
@@ -224,20 +280,24 @@ export default function InstructorDashboard() {
   // Instructor Lab Preview State (Test lab environment, VM, guide, and dynamic questions before or after publishing)
   const [showLabPreviewModal, setShowLabPreviewModal] = useState(false)
   const [previewLabData, setPreviewLabData] = useState(null)
-  const [previewLabTab, setPreviewLabTab] = useState('vm') // 'vm' | 'guide' | 'form'
+  const [previewLabTab, setPreviewLabTab] = useState('guide') // 'guide' | 'form'; desktops stay mounted alongside
   const [previewVmLoading, setPreviewVmLoading] = useState(false)
   const [previewVmError, setPreviewVmError] = useState('')
-  const [previewGuacamoleUrl, setPreviewGuacamoleUrl] = useState('')
-  const [previewVmInfo, setPreviewVmInfo] = useState(null)
+  const [previewSessions, setPreviewSessions] = useState([])
+  const [previewActiveId, setPreviewActiveId] = useState(null)
+  const previewVmInfo = previewSessions.find(vm => vm.lab_vm_id === previewActiveId) || null
+  const previewGuacamoleUrl = previewVmInfo?.guacamole_url || ''
   const [previewAnswers, setPreviewAnswers] = useState({})
   const previewGuacRef = useRef(null)
+  const previewDesktopRef = useRef(null)
+  const [previewThumbnailContainer, setPreviewThumbnailContainer] = useState(null)
+  const [previewScreenshotLoading, setPreviewScreenshotLoading] = useState(false)
 
   const openLabPreview = async (lab) => {
     setPreviewLabData(lab)
-    setPreviewLabTab(lab.enable_vm !== false ? 'vm' : 'guide')
+    setPreviewLabTab('guide')
     setPreviewVmError('')
-    setPreviewGuacamoleUrl('')
-    setPreviewVmInfo(null)
+    setPreviewSessions([])
     setPreviewAnswers({})
     setShowLabPreviewModal(true)
 
@@ -250,10 +310,7 @@ export default function InstructorDashboard() {
   const launchPreviewVmSession = async (labId) => {
     setPreviewVmLoading(true)
     setPreviewVmError('')
-    setPreviewGuacamoleUrl('')
-    setPreviewVmInfo(null)
-    localStorage.removeItem('GUAC_AUTH_TOKEN')
-    sessionStorage.removeItem('GUAC_AUTH_TOKEN')
+    setPreviewSessions([])
     const token = localStorage.getItem('malsec_token')
     try {
       const res = await fetch(`/api/labs/${labId}/vm-session`, {
@@ -271,8 +328,9 @@ export default function InstructorDashboard() {
         }
       }
       if (!res.ok) throw new Error(data.detail || 'Failed to establish instructor preview VM session')
-      setPreviewGuacamoleUrl(data.guacamole_url)
-      setPreviewVmInfo(data)
+      if (!Array.isArray(data.vms) || !data.vms.length) throw new Error('No VM sessions returned')
+      setPreviewSessions(data.vms)
+      setPreviewActiveId(current => data.vms.some(vm => vm.lab_vm_id === current) ? current : data.vms[0].lab_vm_id)
     } catch (err) {
       setPreviewVmError(err.message)
     } finally {
@@ -280,13 +338,27 @@ export default function InstructorDashboard() {
     }
   }
 
+  const handlePreviewScreenshot = async () => {
+    if (!previewLabData || !previewVmInfo) return
+    setPreviewScreenshotLoading(true)
+    try {
+      const res = await fetch(`/api/labs/${previewLabData.id}/vm-screenshot?lab_vm_id=${previewActiveId}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('malsec_token')}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Could not capture VM screenshot')
+      alert(data.message || 'Screenshot saved to Desktop inside your VM!')
+    } catch (err) { alert('Screenshot error: ' + err.message) }
+    finally { setPreviewScreenshotLoading(false) }
+  }
+
   const handlePreviewVmRollback = async () => {
-    if (!previewLabData) return
+    if (!previewLabData || !previewVmInfo) return
     if (!window.confirm('Reset this instructor preview VM back to clean template state?')) return
     setPreviewVmLoading(true)
     const token = localStorage.getItem('malsec_token')
     try {
-      const res = await fetch(`/api/labs/${previewLabData.id}/vm-rollback`, {
+      const res = await fetch(`/api/labs/${previewLabData.id}/vm-rollback?lab_vm_id=${previewActiveId}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       })
@@ -294,8 +366,7 @@ export default function InstructorDashboard() {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.detail || 'Unable to reset preview VM')
       }
-      setPreviewGuacamoleUrl('')
-      setPreviewVmInfo(null)
+      setPreviewSessions([])
       await launchPreviewVmSession(previewLabData.id)
     } catch (err) {
       alert('VM Reset error: ' + err.message)
@@ -1651,17 +1722,26 @@ export default function InstructorDashboard() {
       setModalError('Please create at least one question field for the lab report (or enable Exam / Test Mode for in-VM Word report)!')
       return
     }
-    if (enableVm && !editingLab && !vmPassword) {
-      setModalError('Please enter a password for the VM connection!')
+    const definitions = currentVmDefinitions()
+    if (enableVm && !definitions.length) {
+      setModalError('Please configure at least one machine!')
       return
     }
-    if (enableVm && (!templateVmid || !vmProtocol || !vmPort)) {
-      setModalError('VM template, protocol, or port configuration is incomplete!')
-      return
-    }
-    if (enableVm && vmProtocol !== 'vnc' && !vmUsername.trim()) {
-      setModalError('Please enter a username for RDP/SSH connection!')
-      return
+    for (const [index, vm] of definitions.entries()) {
+      if (!enableVm) break
+      const prefix = `Machine ${index + 1}: `
+      if (!editingLab && !vm.vm_password) {
+        setModalError(prefix + 'Please enter a password for the VM connection!')
+        return
+      }
+      if (!vm.template_vmid || !vm.vm_protocol || !vm.vm_port) {
+        setModalError(prefix + 'VM template, protocol, or port configuration is incomplete!')
+        return
+      }
+      if (vm.vm_protocol !== 'vnc' && !vm.vm_username.trim()) {
+        setModalError(prefix + 'Please enter a username for RDP/SSH connection!')
+        return
+      }
     }
     setActionLoading(true)
     setError('')
@@ -1686,26 +1766,23 @@ export default function InstructorDashboard() {
         class_id: parseInt(classId),
         is_active: true,
         enable_vm: enableVm,
-        vm_drive_mode: vmDriveMode,
-        vm_drive_files: vmDriveMode === 'custom' ? vmDriveFiles : [],
         disable_vm_copy: disableVmCopy,
         disable_vm_paste: disableVmPaste,
-        is_exam_mode: isExamMode,
-        cpu_cores: cpuCores ? parseInt(cpuCores) : null,
-        ram_mb: ramGb ? Math.round(parseFloat(ramGb) * 1024) : null
+        is_exam_mode: isExamMode
       }
       if (enableVm) {
-        payload.template_vmid = parseInt(templateVmid)
-        payload.is_linked_clone = isLinkedClone
-        payload.vm_protocol = vmProtocol
-        payload.vm_port = parseInt(vmPort)
-        payload.vm_username = vmUsername.trim()
-        if (vmPassword) payload.vm_password = vmPassword
-        payload.disable_vm_copy = disableVmCopy
-        payload.disable_vm_paste = disableVmPaste
-        payload.is_exam_mode = isExamMode
-        payload.cpu_cores = cpuCores ? parseInt(cpuCores) : null
-        payload.ram_mb = ramGb ? Math.round(parseFloat(ramGb) * 1024) : null
+        payload.vms = editingLab
+          ? definitions.map(vm => {
+              const original = editingLab.vms.find(item => item.id === vm.id)
+              const update = { id: vm.id }
+              const editable = ['cpu_cores', 'ram_mb', 'vm_protocol', 'vm_port', 'vm_username', 'vm_drive_mode', 'vm_drive_files']
+              editable.forEach(key => {
+                if (JSON.stringify(vm[key]) !== JSON.stringify(original[key])) update[key] = vm[key]
+              })
+              if (vm.vm_password) update.vm_password = vm.vm_password
+              return update
+            }).filter(vm => Object.keys(vm).length > 1)
+          : definitions.map(({ id, ...vm }) => vm)
       }
 
       let res
@@ -1745,6 +1822,8 @@ export default function InstructorDashboard() {
 
   const resetLabForm = () => {
     setEditingLab(null)
+    setVmDefinitions([])
+    setActiveVmIndex(0)
     setLabTitle('')
     setLabDesc('')
     setGradeTag('')
@@ -1765,6 +1844,8 @@ export default function InstructorDashboard() {
 
   const openCreateLabModal = () => {
     setEditingLab(null)
+    setVmDefinitions([newVmDefinition()])
+    setActiveVmIndex(0)
     setLabTitle('')
     setLabDesc('')
     setGradeTag('')
@@ -1822,17 +1903,10 @@ export default function InstructorDashboard() {
     setDisableVmCopy(Boolean(lab.disable_vm_copy))
     setDisableVmPaste(Boolean(lab.disable_vm_paste))
     setIsExamMode(Boolean(lab.is_exam_mode))
-    setCpuCores(lab.cpu_cores ? String(lab.cpu_cores) : '')
-    setRamGb(lab.ram_mb ? String(Math.round(lab.ram_mb / 1024)) : '')
-    setIsLinkedClone(lab.is_linked_clone !== false)
-    setVmDriveMode(lab.vm_drive_mode || 'default')
-    setVmDriveFiles(Array.isArray(lab.vm_drive_files) ? lab.vm_drive_files : [])
-    const configuredProtocol = lab.vm_protocol || runtimeConfig?.vm?.default_protocol || ''
-    setTemplateVmid(lab.template_vmid || runtimeConfig?.vm?.default_template_vmid || '')
-    setVmProtocol(configuredProtocol)
-    setVmPort(lab.vm_port || runtimeConfig?.vm?.protocol_ports?.[configuredProtocol] || '')
-    setVmUsername(lab.vm_username || '')
-    setVmPassword('')
+    const definitions = (lab.vms || []).map(vm => ({ ...vm, vm_password: '' }))
+    setVmDefinitions(definitions)
+    setActiveVmIndex(0)
+    loadVmEditor(definitions[0] || newVmDefinition())
     setModalError('')
 
     fetchPveTemplates()
@@ -3135,16 +3209,10 @@ export default function InstructorDashboard() {
                                 <td>
                                   {lab.enable_vm !== false ? (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                        <span style={{ fontSize: '13px', fontWeight: '600', color: lab.is_linked_clone ? '#0284c7' : '#d97706', fontFamily: 'var(--font-mono)' }}>
-                                          {lab.is_linked_clone ? '⚡ Linked' : '📦 Full'}
-                                        </span>
-                                        {(lab.cpu_cores || lab.ram_mb) && (
-                                          <span style={{ fontSize: '10.5px', background: '#f1f5f9', color: '#475569', padding: '1px 4px', borderRadius: '4px', fontFamily: 'var(--font-mono)' }}>
-                                            {lab.cpu_cores ? `${lab.cpu_cores}C` : ''}{lab.cpu_cores && lab.ram_mb ? ' / ' : ''}{lab.ram_mb ? `${Math.round(lab.ram_mb / 1024)}GB` : ''}
-                                          </span>
-                                        )}
-                                      </div>
+                                      <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}
+                                        title={(lab.vms || []).map((vm, index) => `Machine ${index + 1}: template ${vm.template_vmid}, ${vm.cpu_cores || 'default'} CPU / ${vm.ram_mb || 'default'} MB`).join('\n')}>
+                                        {(lab.vms || []).length} machine(s)
+                                      </span>
                                       {lab.is_exam_mode && (
                                         <span style={{ fontSize: '11px', color: '#be185d', fontWeight: '700', display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
                                           🎓 Exam Mode
@@ -5591,7 +5659,7 @@ export default function InstructorDashboard() {
                                   <div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                       <span style={{ fontWeight: '600', color: isDocx ? '#1d4ed8' : 'var(--text-primary)', wordBreak: 'break-all', fontSize: '13.5px' }}>
-                                        {fname}
+                                        {attachment.lab_vm_id ? `[Machine #${attachment.lab_vm_id}] ` : ''}{fname}
                                       </span>
                                       {isDocx && (
                                         <span className="badge" style={{ background: '#2563eb', color: '#ffffff', fontSize: '10px', padding: '1px 6px' }}>
@@ -6614,7 +6682,8 @@ export default function InstructorDashboard() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input 
                         type="checkbox" 
-                        id="enableVmCheck" 
+                        id="enableVmCheck"
+                        disabled={Boolean(editingLab) && !(editingLab.vms || []).length}
                         checked={enableVm}
                         onChange={(e) => {
                           const checked = e.target.checked
@@ -6636,6 +6705,18 @@ export default function InstructorDashboard() {
 
                 {enableVm && (
                   <div style={{ padding: '16px', background: 'rgba(242, 112, 36, 0.04)', borderRadius: '8px', border: '1px solid rgba(242, 112, 36, 0.3)', marginBottom: '16px' }}>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px', alignItems: 'center' }}>
+                      {vmDefinitions.map((vm, index) => (
+                        <button type="button" key={vm.id || index} onClick={() => selectVmDefinition(index)}
+                          className={`btn ${index === activeVmIndex ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{ padding: '6px 12px', fontSize: '12px' }}>
+                          Machine {index + 1}{vm.id ? ` (#${vm.id})` : ''}
+                        </button>
+                      ))}
+                      {!editingLab && <button type="button" className="btn btn-secondary" onClick={addVmDefinition} style={{ padding: '6px 12px', fontSize: '12px' }}><Plus size={13} /> Add machine</button>}
+                      {!editingLab && vmDefinitions.length > 1 && <button type="button" className="btn btn-secondary" onClick={removeVmDefinition} style={{ padding: '6px 12px', fontSize: '12px', color: 'var(--neon-ruby)' }}><Trash2 size={13} /> Remove selected</button>}
+                    </div>
+                    {editingLab && <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Edit existing machines only. Template and clone type cannot be changed.</p>}
                     <label className="form-label" style={{ color: 'var(--neon-cyan)', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '6px' }}>
                       🖥️ Select Proxmox Template VM
                     </label>
@@ -6645,11 +6726,12 @@ export default function InstructorDashboard() {
                       value={templateVmid}
                       onChange={(e) => setTemplateVmid(e.target.value)}
                       required
-                      disabled={pveTemplates.length === 0}
+                      disabled={Boolean(editingLab) || pveTemplates.length === 0}
                     >
                       {pveTemplates.length === 0 && (
                         <option value="">Could not load template VM from Proxmox</option>
                       )}
+                      {editingLab && !pveTemplates.some(t => Number(t.vmid) === Number(templateVmid)) && <option value={templateVmid}>VM {templateVmid}</option>}
                       {pveTemplates.map(t => (
                         <option key={t.vmid} value={t.vmid}>
                           VM {t.vmid} - {t.name} ({t.status || 'Template'})
@@ -6666,6 +6748,7 @@ export default function InstructorDashboard() {
                           <input
                             type="radio"
                             name="cloneMode"
+                            disabled={Boolean(editingLab)}
                             checked={isLinkedClone === true}
                             onChange={() => setIsLinkedClone(true)}
                             style={{ accentColor: 'var(--neon-cyan)' }}
@@ -6676,6 +6759,7 @@ export default function InstructorDashboard() {
                           <input
                             type="radio"
                             name="cloneMode"
+                            disabled={Boolean(editingLab)}
                             checked={isLinkedClone === false}
                             onChange={() => setIsLinkedClone(false)}
                             style={{ accentColor: 'var(--neon-cyan)' }}
@@ -7138,17 +7222,15 @@ export default function InstructorDashboard() {
                           form_schema: formFields,
                           attachments: labAttachments,
                           enable_vm: enableVm,
-                          template_vmid: templateVmid ? parseInt(templateVmid) : null,
-                          is_linked_clone: isLinkedClone,
-                          vm_protocol: vmProtocol,
-                          vm_port: vmPort ? parseInt(vmPort) : null,
+                          // Provisioning preview uses saved definitions, never unsaved drafts.
+                          vms: editingLab.vms,
                           disable_vm_copy: disableVmCopy
                         }
                         openLabPreview(tempLabObj)
                       }} 
                       className="btn btn-secondary" 
                       style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#16a34a', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                      title="Preview this lab and test VM environment"
+                      title="Preview lab content; VM environment uses the last saved configuration"
                     >
                       <Eye size={15} /> Preview Lab
                     </button>
@@ -7366,6 +7448,7 @@ export default function InstructorDashboard() {
                   <thead>
                     <tr>
                       <th>Student (Username)</th>
+                      <th>Machine configuration</th>
                       <th>VMID</th>
                       <th>IP Address</th>
                       <th>Proxmox Status</th>
@@ -7375,11 +7458,12 @@ export default function InstructorDashboard() {
                   </thead>
                   <tbody>
                     {studentVms.map(vm => (
-                      <tr key={vm.vmid}>
+                      <tr key={`${vm.student_username}:${vm.lab_vm_id}`}>
                         <td>
                           <div style={{ fontWeight: '600', color: 'var(--neon-cyan)' }}>{vm.student_full_name}</div>
                           <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{vm.student_username}</div>
                         </td>
+                        <td>Machine #{vm.lab_vm_id}</td>
                         <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 'bold' }}>{vm.vmid}</td>
                         <td style={{ fontFamily: 'var(--font-mono)' }}>{vm.ip_address}</td>
                         <td>
@@ -7435,7 +7519,7 @@ export default function InstructorDashboard() {
                     ))}
                     {studentVms.length === 0 && (
                       <tr>
-                        <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                        <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
                           No students enrolled in this class or assigned yet.
                         </td>
                       </tr>
@@ -7477,7 +7561,7 @@ export default function InstructorDashboard() {
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
                     {cloneSourceLab.enable_vm ? (
                       <span className="badge" style={{ background: '#d1fae5', color: '#065f46', fontSize: '11px', fontWeight: '600' }}>
-                        🖥️ VM {cloneSourceLab.template_vmid} ({cloneSourceLab.is_linked_clone ? 'Linked' : 'Full'}) | {cloneSourceLab.vm_protocol?.toUpperCase()}
+                        🖥️ {(cloneSourceLab.vms || []).length} machine(s)
                       </span>
                     ) : (
                       <span className="badge" style={{ background: '#f1f5f9', color: '#64748b', fontSize: '11px' }}>
@@ -7485,25 +7569,16 @@ export default function InstructorDashboard() {
                       </span>
                     )}
 
-                    {cloneSourceLab.vm_drive_mode === 'custom' ? (
-                      <span className="badge" style={{ background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', fontSize: '11px', fontWeight: '600' }}>
-                        💿 Custom Drive D: ({cloneSourceLab.vm_drive_files?.length || 0} files)
+                    {(cloneSourceLab.vms || []).map((vm, index) => (
+                      <span key={vm.id} className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '11px' }}>
+                        Machine {index + 1}: VM {vm.template_vmid} ({vm.is_linked_clone ? 'Linked' : 'Full'}) · {vm.vm_protocol.toUpperCase()}
+                        {' · '}{vm.cpu_cores || 'default'} vCPU / {vm.ram_mb ? `${vm.ram_mb / 1024}GB` : 'default RAM'}
+                        {' · '}{vm.vm_drive_mode === 'custom' ? `Custom tools (${vm.vm_drive_files?.length || 0})` : 'Default tools'}
                       </span>
-                    ) : (
-                      <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontSize: '11px' }}>
-                        💿 Default Tools Drive D:
-                      </span>
-                    )}
-
+                    ))}
                     {cloneSourceLab.is_exam_mode && (
                       <span className="badge" style={{ background: '#fdf2f8', color: '#db2777', border: '1px solid #fbcfe8', fontSize: '11px', fontWeight: '700' }}>
                         🎓 Exam Mode
-                      </span>
-                    )}
-
-                    {(cloneSourceLab.cpu_cores || cloneSourceLab.ram_mb) && (
-                      <span className="badge" style={{ background: '#f3e8ff', color: '#6b21a8', fontSize: '11px' }}>
-                        ⚡ {cloneSourceLab.cpu_cores ? `${cloneSourceLab.cpu_cores} vCPU` : ''}{cloneSourceLab.cpu_cores && cloneSourceLab.ram_mb ? ' / ' : ''}{cloneSourceLab.ram_mb ? `${Math.round(cloneSourceLab.ram_mb / 1024)}GB RAM` : ''}
                       </span>
                     )}
 
@@ -8066,8 +8141,7 @@ export default function InstructorDashboard() {
                 type="button" 
                 onClick={() => {
                   setShowLabPreviewModal(false)
-                  setPreviewGuacamoleUrl('')
-                  setPreviewVmInfo(null)
+                  setPreviewSessions([])
                 }} 
                 className="btn-icon btn-secondary" 
                 style={{ width: '30px', height: '30px', color: '#94a3b8' }}
@@ -8080,16 +8154,6 @@ export default function InstructorDashboard() {
             {/* Sub-header Tabs & Banner */}
             <div style={{ background: '#0f172a', padding: '8px 20px', borderBottom: '1px solid #1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
               <div style={{ display: 'flex', gap: '8px' }}>
-                {previewLabData.enable_vm !== false && (
-                  <button
-                    type="button"
-                    onClick={() => setPreviewLabTab('vm')}
-                    className={`btn ${previewLabTab === 'vm' ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ padding: '5px 14px', fontSize: '12.5px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                  >
-                    <Monitor size={14} /> VDI Lab Desktop {previewVmInfo ? `(VMID ${previewVmInfo.vmid})` : ''}
-                  </button>
-                )}
                 <button
                   type="button"
                   onClick={() => setPreviewLabTab('guide')}
@@ -8107,44 +8171,47 @@ export default function InstructorDashboard() {
                   <FileCheck size={14} /> Questions Form ({(previewLabData.form_schema || []).length})
                 </button>
               </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                {previewLabData.enable_vm !== false && previewLabTab === 'vm' && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => launchPreviewVmSession(previewLabData.id)}
-                      disabled={previewVmLoading}
-                      className="btn btn-secondary"
-                      style={{ padding: '4px 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
-                      title="Reconnect VM Session"
-                    >
-                      <RefreshCw size={13} className={previewVmLoading ? 'animate-spin' : ''} /> Reconnect
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handlePreviewVmRollback}
-                      disabled={previewVmLoading}
-                      className="btn btn-secondary"
-                      style={{ padding: '4px 10px', fontSize: '12px', color: 'var(--neon-ruby)', borderColor: 'rgba(239, 68, 68, 0.3)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
-                      title="Rollback VM to clean template snapshot"
-                    >
-                      <RotateCcw size={13} /> Reset VM
-                    </button>
-                  </>
-                )}
-                <span style={{ fontSize: '11.5px', color: '#94a3b8' }}>
-                  ⚡ Mock preview environment — No student grades or submissions affected
-                </span>
-              </div>
             </div>
 
-            {/* Modal Body: Active Tab View */}
-            <div style={{ flex: 1, overflowY: 'auto', background: '#090d16', position: 'relative', display: 'flex', flexDirection: 'column' }}>
-              
-              {/* TAB 1: Guacamole VDI VM View */}
-              {previewLabTab === 'vm' && previewLabData.enable_vm !== false && (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
+            {/* Persistent desktop pane + guide/form pane (existing preview theme). */}
+            <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', background: '#090d16', position: 'relative', display: 'flex', flexDirection: 'row' }}>
+
+              {/* Guacamole VDI VM View */}
+              {previewLabData.enable_vm !== false && (
+                <div style={{ flex: '0 0 65%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto', gap: 12, borderRight: '1px solid #1e293b' }}>
+                  <div ref={setPreviewThumbnailContainer} style={{ flexShrink: 0, display: previewSessions.length ? 'block' : 'none' }} />
+                  <div ref={previewDesktopRef} style={{ flex: '0 0 100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: '#090d16' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px', flexWrap: 'wrap', background: '#0f172a', borderBottom: '1px solid #1e293b' }}>
+                        <span style={{ fontSize: '12px', color: '#94a3b8' }}>{previewVmInfo ? `VM ${previewVmInfo.vmid}` : 'Lab desktops'}</span>
+                        <button type="button" className="btn btn-secondary" disabled={!previewGuacamoleUrl} title="Focus selected VM"
+                          onClick={() => previewGuacRef.current?.contentWindow?.focus()} style={{ padding: '4px 8px' }}><Keyboard size={13} /></button>
+                        <button type="button" className="btn btn-secondary" disabled={!previewGuacamoleUrl || previewScreenshotLoading} title="Screenshot selected VM"
+                          onClick={handlePreviewScreenshot} style={{ padding: '4px 8px' }}><Camera size={13} /></button>
+                        <button type="button" className="btn btn-secondary" disabled={!previewGuacamoleUrl} title="Full screen selected desktop"
+                          onClick={() => document.fullscreenElement ? document.exitFullscreen() : previewDesktopRef.current?.requestFullscreen()} style={{ padding: '4px 8px' }}><Maximize2 size={13} /></button>
+                        {previewGuacamoleUrl && <a className="btn btn-secondary" href={connectionUrl(previewGuacamoleUrl)} target="_blank" rel="noreferrer" title="Open selected VM in new window" style={{ padding: '4px 8px' }}><ExternalLink size={13} /></a>}
+                        <button
+                          type="button"
+                          onClick={() => launchPreviewVmSession(previewLabData.id)}
+                          disabled={previewVmLoading}
+                          className="btn btn-secondary"
+                          style={{ padding: '4px 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                          title="Reload all lab VM sessions"
+                        >
+                          <RefreshCw size={13} className={previewVmLoading ? 'animate-spin' : ''} /> Reconnect
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handlePreviewVmRollback}
+                          disabled={previewVmLoading || !previewVmInfo}
+                          className="btn btn-secondary"
+                          style={{ padding: '4px 10px', fontSize: '12px', color: 'var(--neon-ruby)', borderColor: 'rgba(239, 68, 68, 0.3)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                          title="Rollback VM to clean template snapshot"
+                        >
+                          <RotateCcw size={13} /> Reset VM
+                        </button>
+
+                  </div>
                   {previewVmLoading ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: '#a5f3fc', gap: '14px' }}>
                       <RefreshCw size={36} className="animate-spin" style={{ color: 'var(--neon-cyan)' }} />
@@ -8168,13 +8235,12 @@ export default function InstructorDashboard() {
                       </button>
                     </div>
                   ) : previewGuacamoleUrl ? (
-                    <iframe
-                      ref={previewGuacRef}
-                      key={previewGuacamoleUrl}
-                      src={previewGuacamoleUrl}
-                      title="Instructor Preview Apache Guacamole VDI"
-                      style={{ width: '100%', height: '100%', border: 'none', flex: 1 }}
-                      allow="clipboard-read; clipboard-write; fullscreen; keyboard-map"
+                    <GuacamoleWorkspace
+                      sessions={previewSessions}
+                      activeId={previewActiveId}
+                      onSelect={setPreviewActiveId}
+                      activeFrameRef={previewGuacRef}
+                      thumbnailContainer={previewThumbnailContainer}
                     />
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1 }}>
@@ -8190,12 +8256,13 @@ export default function InstructorDashboard() {
                       </button>
                     </div>
                   )}
+                  </div>
                 </div>
               )}
 
               {/* TAB 2: Lab Instructions & Guide View */}
               {previewLabTab === 'guide' && (
-                <div style={{ padding: '28px', maxWidth: '900px', margin: '0 auto', width: '100%' }}>
+                <div style={{ padding: '20px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
                   <div className="cyber-card" style={{ background: '#0f172a', border: '1px solid #1e293b', padding: '24px', borderRadius: '10px' }}>
                     <h3 style={{ fontSize: '18px', color: 'var(--neon-cyan)', marginBottom: '14px', borderBottom: '1px solid #1e293b', paddingBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <BookOpen size={18} /> Lab Instructions & Guide
@@ -8254,7 +8321,7 @@ export default function InstructorDashboard() {
 
               {/* TAB 3: Dynamic Questions Form Mock */}
               {previewLabTab === 'form' && (
-                <div style={{ padding: '28px', maxWidth: '850px', margin: '0 auto', width: '100%' }}>
+                <div style={{ padding: '20px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
                   <div className="cyber-card" style={{ background: '#0f172a', border: '1px solid #1e293b', padding: '24px', borderRadius: '10px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid #1e293b', paddingBottom: '10px' }}>
                       <h3 style={{ fontSize: '17px', color: '#ffffff', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -8347,8 +8414,7 @@ export default function InstructorDashboard() {
                 type="button"
                 onClick={() => {
                   setShowLabPreviewModal(false)
-                  setPreviewGuacamoleUrl('')
-                  setPreviewVmInfo(null)
+                  setPreviewSessions([])
                 }}
                 className="btn btn-secondary"
                 style={{ padding: '6px 20px' }}
