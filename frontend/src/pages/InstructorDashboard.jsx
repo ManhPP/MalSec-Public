@@ -6998,6 +6998,18 @@ export default function InstructorDashboard() {
                       </div>
                     </div>
 
+                    {runtimeConfig?.vm && (
+                      <p style={{ fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '8px', marginBottom: 0 }}>
+                        📌 Template VMs are in VMID range <b>{runtimeConfig.vm.template_vmid_min} – {runtimeConfig.vm.template_vmid_max}</b>. Student VMs are in range <b>{runtimeConfig.vm.student_vmid_min} – {runtimeConfig.vm.student_vmid_max}</b>.
+                      </p>
+                    )}
+
+                  </div>
+                )}
+                {enableVm && (
+                  <div style={{ padding: '16px', background: 'rgba(242, 112, 36, 0.04)', borderRadius: '8px', border: '1px solid rgba(242, 112, 36, 0.3)', marginBottom: '16px' }}>
+                    <h4 style={{ color: 'var(--neon-cyan)', margin: '0 0 8px', fontSize: '14px' }}>Lab-wide VM Policies</h4>
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '12px', margin: 0 }}>Applies to every machine in this lab, not just the selected configuration.</p>
                     {/* Exam / Test Mode Switch */}
                     <div style={{ 
                       marginTop: '14px', 
@@ -7087,17 +7099,8 @@ export default function InstructorDashboard() {
                         </label>
                       </div>
                     </div>
-
-                    {runtimeConfig?.vm && (
-                      <p style={{ fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '8px', marginBottom: 0 }}>
-                        📌 Template VMs are in VMID range <b>{runtimeConfig.vm.template_vmid_min} – {runtimeConfig.vm.template_vmid_max}</b>. Student VMs are in range <b>{runtimeConfig.vm.student_vmid_min} – {runtimeConfig.vm.student_vmid_max}</b>.
-                      </p>
-                    )}
-
                   </div>
                 )}
-
-
 
                 {allowLate && (
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', padding: '14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid var(--border-color)', marginBottom: '20px' }}>
@@ -8179,7 +8182,7 @@ export default function InstructorDashboard() {
               {/* Guacamole VDI VM View */}
               {previewLabData.enable_vm !== false && (
                 <div style={{ flex: '0 0 65%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto', gap: 12, borderRight: '1px solid #1e293b' }}>
-                  <div ref={setPreviewThumbnailContainer} style={{ flexShrink: 0, display: previewSessions.length ? 'block' : 'none' }} />
+                  <div ref={setPreviewThumbnailContainer} style={{ flexShrink: 0, display: previewSessions.length > 1 ? 'block' : 'none' }} />
                   <div ref={previewDesktopRef} style={{ flex: '0 0 100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: '#090d16' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px', flexWrap: 'wrap', background: '#0f172a', borderBottom: '1px solid #1e293b' }}>
                         <span style={{ fontSize: '12px', color: '#94a3b8' }}>{previewVmInfo ? `VM ${previewVmInfo.vmid}` : 'Lab desktops'}</span>

@@ -2620,7 +2620,7 @@ export default function StudentDashboard() {
             {/* Split Left (65%): Mind-blowing Apache Guacamole RDP connection simulator */}
             {selectedLab.enable_vm !== false && (
               <div className="split-left" style={{ height: '100%', minHeight: 0, minWidth: 0 }}>
-                <div ref={setVmThumbnailContainer} style={{ flexShrink: 0, display: vmSessions.length ? 'block' : 'none' }} />
+                <div ref={setVmThumbnailContainer} style={{ flexShrink: 0, display: vmSessions.length > 1 ? 'block' : 'none' }} />
                 <div 
                   ref={vmWrapperRef} 
                   className={`vm-screen-wrapper ${isVmFullscreen ? 'vm-fullscreen-mode' : ''}`} 

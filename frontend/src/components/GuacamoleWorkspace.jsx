@@ -10,6 +10,7 @@ export default function GuacamoleWorkspace({ sessions, activeId, onSelect, activ
   const [ready, setReady] = useState(false)
   const [error, setError] = useState('')
   const [states, setStates] = useState({})
+  const showThumbnails = sessions.length > 1
   const first = sessions[0]
   const firstUrl = first?.guacamole_url
   let base = ''
@@ -34,7 +35,7 @@ export default function GuacamoleWorkspace({ sessions, activeId, onSelect, activ
   }, [activeId, ready, activeFrameRef])
 
   useEffect(() => {
-    if (!ready) return
+    if (!ready || !showThumbnails) return
     const timer = setInterval(() => {
       const next = {}
       sessions.forEach(vm => {
@@ -46,7 +47,7 @@ export default function GuacamoleWorkspace({ sessions, activeId, onSelect, activ
       setStates(next)
     }, 750)
     return () => clearInterval(timer)
-  }, [sessions, ready])
+  }, [sessions, ready, showThumbnails])
 
   return (
     <>
@@ -70,7 +71,7 @@ export default function GuacamoleWorkspace({ sessions, activeId, onSelect, activ
         ))}
       </div>
       {/* Only the thumbnails move outside the desktop frame; iframes stay here. */}
-      {thumbnailContainer && createPortal(
+      {showThumbnails && thumbnailContainer && createPortal(
         <div role="tablist" aria-label="Lab machines" onMouseEnter={e => e.stopPropagation()} onClick={e => e.stopPropagation()}
           style={{ display: 'flex', gap: 8, padding: 8, overflowX: 'auto', border: '1px solid var(--border-color)', borderRadius: 8, background: 'var(--bg-secondary)' }}>
           {sessions.map((vm, index) => (
