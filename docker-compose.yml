@@ -12,7 +12,7 @@ services:
     ports:
       - "127.0.0.1:${DB_HOST_PORT:?DB_HOST_PORT is required}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+    #   - postgres_data:/var/lib/postgresql/data
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     healthcheck:
@@ -24,10 +24,7 @@ services:
       - malsec-network
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    image: malsec-backend:1.0.0
+    image: chiennc4805/malsec-backend:1.0.2
     container_name: malsec-backend
     restart: always
     command:
@@ -88,7 +85,7 @@ services:
       GUAC_RDP_ENABLE_DESKTOP_COMPOSITION: "${GUAC_RDP_ENABLE_DESKTOP_COMPOSITION:?GUAC_RDP_ENABLE_DESKTOP_COMPOSITION is required}"
       GUAC_SSH_IGNORE_HOST_KEY: "${GUAC_SSH_IGNORE_HOST_KEY:?GUAC_SSH_IGNORE_HOST_KEY is required}"
     volumes:
-      - student_uploads:/app/uploads
+      # - student_uploads:/app/uploads
 
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
@@ -99,15 +96,7 @@ services:
       - malsec-network
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_DEV_HOST: "${VITE_DEV_HOST:?VITE_DEV_HOST is required}"
-        VITE_DEV_PORT: "${VITE_DEV_PORT:?VITE_DEV_PORT is required}"
-        VITE_API_PROXY_TARGET: "${VITE_API_PROXY_TARGET:?VITE_API_PROXY_TARGET is required}"
-        VITE_API_PROXY_SECURE: "${VITE_API_PROXY_SECURE:?VITE_API_PROXY_SECURE is required}"
-    image: malsec-frontend:1.0.0
+    image: chiennc4805/malsec-frontend:1.0.2
     container_name: malsec-frontend
     restart: always
     environment:
@@ -151,10 +140,6 @@ services:
       - guacd
     networks:
       - malsec-network
-
-volumes:
-  postgres_data:
-  student_uploads:
 
 networks:
   malsec-network:
