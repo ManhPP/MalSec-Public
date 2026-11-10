@@ -27,7 +27,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    image: malsec-backend:1.0.2
+    image: malsec-backend:1.0.3
     container_name: malsec-backend
     restart: always
     command:
@@ -110,7 +110,7 @@ services:
         VITE_DEV_PORT: "${VITE_DEV_PORT:?VITE_DEV_PORT is required}"
         VITE_API_PROXY_TARGET: "${VITE_API_PROXY_TARGET:?VITE_API_PROXY_TARGET is required}"
         VITE_API_PROXY_SECURE: "${VITE_API_PROXY_SECURE:?VITE_API_PROXY_SECURE is required}"
-    image: malsec-frontend:1.0.3
+    image: malsec-frontend:1.0.4
     container_name: malsec-frontend
     restart: always
     environment:
