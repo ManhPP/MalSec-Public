@@ -195,6 +195,7 @@ class SemesterOut(SemesterBase):
 
 # --- LAB SCHEMAS ---
 class LabVMEditable(BaseModel):
+    is_exam_submission_vm: bool = False
     cpu_cores: Optional[int] = None
     ram_mb: Optional[int] = None
     vm_protocol: Optional[Literal["rdp", "vnc", "ssh"]] = None

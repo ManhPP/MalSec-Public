@@ -109,6 +109,7 @@ class LabVM(Base):
     lab_id = Column(Integer, ForeignKey('labs.id'), nullable=False, index=True)
     template_vmid = Column(Integer, nullable=False)
     is_linked_clone = Column(Boolean, nullable=False, default=True, server_default='true')
+    is_exam_submission_vm = Column(Boolean, nullable=False, default=False, server_default='false')
     cpu_cores = Column(Integer, nullable=True)
     ram_mb = Column(Integer, nullable=True)
     vm_protocol = Column(String, nullable=True)

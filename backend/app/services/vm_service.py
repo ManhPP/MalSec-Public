@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 class VMConfiguration(TypedDict):
     """The old per-VM provision arguments, identified by a saved lab_vms record."""
     lab_vm_id: int
+    is_exam_submission_vm: bool
     template_vmid: int
     protocol: str
     port: int
@@ -512,9 +513,9 @@ def provision_student_vm(
                         print(f"[+] Waiting {settings.VM_BOOT_WAIT_SECONDS}s for guest VM {new_vmid} "
                               "to finish booting...", flush=True)
                         time.sleep(settings.VM_BOOT_WAIT_SECONDS)
-                    if is_exam_mode:
+                    if is_exam_mode and config["is_exam_submission_vm"]:
                         try:
-                            restore_vm_workspace(new_vmid, student_username, lab_id, config["lab_vm_id"])
+                            restore_vm_workspace(new_vmid, student_username, lab_id)
                         except Exception as ws_err:
                             logger.warning(f"[EXAM_WORKSPACE] Workspace restore skipped/failed on VM {new_vmid}: {ws_err}")
                 if protocol.lower() == "rdp" or port == 3389:
@@ -726,7 +727,7 @@ def rollback_student_vm(student_username: str, lab_id: int, lab_vm_id: int, is_e
                     # Tự động sao lưu Exam_Workspace trước khi xóa máy ảo để không mất bài làm (nếu là bài thi)
                     if is_exam_mode:
                         try:
-                            backup_vm_workspace(target_vmid, student_username, lab_id, lab_vm_id)
+                            backup_vm_workspace(target_vmid, student_username, lab_id)
                             logger.info(f"[EXAM_WORKSPACE] Auto-backed up workspace for {student_username} before rollback on VM {target_vmid}")
                         except Exception as ws_err:
                             logger.warning(f"[EXAM_WORKSPACE] Auto-backup failed before rollback on VM {target_vmid}: {ws_err}")
@@ -1066,10 +1067,11 @@ $dest = Join-Path $desk '{filename}'
         raise RuntimeError(f"Lỗi ghi ảnh vào máy ảo: {str(exc)}")
 
 
-def backup_vm_workspace(vmid: int, student_username: str, lab_id: int, lab_vm_id: int) -> Optional[str]:
+def backup_vm_workspace(vmid: int, student_username: str, lab_id: int) -> Optional[str]:
     """
     Sao lưu toàn bộ thư mục C:\\Users\\<Student>\\Desktop\\Exam_Workspace từ VM về server MalSec.
     Dùng khi sinh viên bấm Rollback VM hoặc nộp bài thi.
+    Một archive chung cho sinh viên/bài lab, lấy từ máy nộp bài được chỉ định.
     Trả về đường dẫn file zip trên server nếu có dữ liệu bài làm, hoặc None nếu rỗng.
     """
     import os
@@ -1131,7 +1133,7 @@ if (Test-Path -LiteralPath $ws) {
 
         backup_dir = os.path.join(settings.UPLOAD_DIR, "exam_workspaces", f"lab_{lab_id}")
         os.makedirs(backup_dir, exist_ok=True)
-        backup_path = os.path.join(backup_dir, f"student_{student_username}_vm_{lab_vm_id}_workspace.zip")
+        backup_path = os.path.join(backup_dir, f"student_{student_username}_workspace.zip")
         with open(backup_path, "wb") as f:
             f.write(zip_bytes)
 
@@ -1142,17 +1144,18 @@ if (Test-Path -LiteralPath $ws) {
         return None
 
 
-def restore_vm_workspace(vmid: int, student_username: str, lab_id: int, lab_vm_id: int) -> bool:
+def restore_vm_workspace(vmid: int, student_username: str, lab_id: int) -> bool:
     """
     Phục hồi thư mục Exam_Workspace từ server MalSec vào VM sau khi rollback hoặc khi khởi động.
     Nếu chưa có backup, tự động tạo sẵn thư mục Exam_Workspace trên Desktop kèm file hướng dẫn.
+    Backup chung theo sinh viên/bài lab vẫn được dùng khi đổi máy nộp bài.
     """
     import os
     import json
     import base64
     import subprocess
 
-    backup_path = os.path.join(settings.UPLOAD_DIR, "exam_workspaces", f"lab_{lab_id}", f"student_{student_username}_vm_{lab_vm_id}_workspace.zip")
+    backup_path = os.path.join(settings.UPLOAD_DIR, "exam_workspaces", f"lab_{lab_id}", f"student_{student_username}_workspace.zip")
     zip_b64 = ""
     if os.path.exists(backup_path):
         try:

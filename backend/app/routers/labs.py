@@ -123,6 +123,19 @@ def _validate_lab_vm(configuration: LabVM, enabled: bool) -> None:
     if not configuration.vm_password:
         raise HTTPException(status_code=422, detail="Vui lòng nhập mật khẩu kết nối máy ảo")
 
+def _validate_exam_submission_vms(definitions: List[LabVM], is_exam_mode: bool) -> None:
+    selected = sum(bool(configuration.is_exam_submission_vm) for configuration in definitions)
+    
+    if is_exam_mode:
+        if selected == 0:
+            raise HTTPException(status_code=422, detail="Chế độ thi (Exam Mode) yêu cầu phải chọn 1 máy ảo làm máy nộp bài")
+        if selected > 1:
+            raise HTTPException(status_code=422, detail="Chế độ thi (Exam Mode) chỉ cho phép chọn duy nhất 1 máy nộp bài")
+    else:
+        # Nếu không phải bài thi thì không được đánh dấu máy nào là máy nộp bài thi
+        if selected > 0:
+            raise HTTPException(status_code=422, detail="Không thể chỉ định máy nộp bài thi khi bài lab chưa bật chế độ thi (Exam Mode)")
+
 @router.post("/", response_model=LabOut, status_code=status.HTTP_201_CREATED)
 def create_lab(
     lab_data: LabCreate,
@@ -159,6 +172,8 @@ def create_lab(
         configuration = LabVM(**values)
         _validate_lab_vm(configuration, bool(lab_data.enable_vm))
         definitions.append(configuration)
+
+    _validate_exam_submission_vms(definitions, bool(lab_data.is_exam_mode))
 
     new_lab = Lab(
         title=lab_data.title,
@@ -222,7 +237,7 @@ def update_lab(
             raise HTTPException(status_code=403, detail="Bạn không quản lý lớp chứa bài lab này")
             
     editable_fields = ("cpu_cores", "ram_mb", "vm_drive_mode", "vm_drive_files",
-                       "vm_protocol", "vm_port", "vm_username", "vm_password")
+                       "vm_protocol", "vm_port", "vm_username", "vm_password", "is_exam_submission_vm")
     legacy_fields = set(editable_fields) | {"template_vmid", "is_linked_clone"}
     if lab_data.vms is not None and legacy_fields & lab_data.model_fields_set:
         raise HTTPException(status_code=422, detail="Không kết hợp cấu hình VM đơn và danh sách vms")
@@ -250,6 +265,7 @@ def update_lab(
     if enabled and not definitions:
         raise HTTPException(status_code=422, detail="Bài lab cần ít nhất một cấu hình máy ảo")
     iso_changed = []
+    candidates = {}
     for definition_id, definition in definitions.items():
         candidate = LabVM(**{
             key: getattr(definition, key) for key in
@@ -260,9 +276,12 @@ def update_lab(
         if (candidate.vm_drive_mode, candidate.vm_drive_files) != (
                 definition.vm_drive_mode, definition.vm_drive_files):
             iso_changed.append(definition_id)
-        # Assign only the requested machine fields, preserving stable definition IDs.
+        candidates[definition_id] = candidate
+    exam_mode = lab.is_exam_mode if lab_data.is_exam_mode is None else lab_data.is_exam_mode
+    _validate_exam_submission_vms(list(candidates.values()), bool(exam_mode))
+    for definition_id, definition in definitions.items():
         for key in changes.get(definition_id, {}):
-            setattr(definition, key, getattr(candidate, key))
+            setattr(definition, key, getattr(candidates[definition_id], key))
 
     if lab_data.title is not None:
         lab.title = lab_data.title
@@ -484,7 +503,8 @@ def clone_lab(
     )
     cloned_lab.vms = [LabVM(**{key: getattr(configuration, key) for key in (
         "template_vmid", "is_linked_clone", "vm_protocol", "vm_port", "vm_username", "vm_password",
-        "vm_drive_mode", "vm_drive_files", "cpu_cores", "ram_mb")}) for configuration in source_lab.vms]
+        "vm_drive_mode", "vm_drive_files", "cpu_cores", "ram_mb", "is_exam_submission_vm")}) for configuration in source_lab.vms]
+    _validate_exam_submission_vms(cloned_lab.vms, bool(cloned_lab.is_exam_mode))
     db.add(cloned_lab)
     db.commit()
     db.refresh(cloned_lab)
@@ -829,7 +849,8 @@ def get_or_create_vm_session(
             lab_vm_id=configuration.id, template_vmid=configuration.template_vmid,
             protocol=configuration.vm_protocol, port=configuration.vm_port,
             is_linked_clone=configuration.is_linked_clone, iso_filename=iso_filename,
-            cpu_cores=configuration.cpu_cores, ram_mb=configuration.ram_mb))
+            cpu_cores=configuration.cpu_cores, ram_mb=configuration.ram_mb,
+            is_exam_submission_vm=configuration.is_exam_submission_vm))
     try:
         provisioned = provision_student_vm(
             student_username=current_user.username, lab_id=lab.id,
@@ -867,7 +888,8 @@ def rollback_vm_session(
     lab = db.query(Lab).filter(Lab.id == lab_id).first()
     if not lab:
         raise HTTPException(status_code=404, detail="Không tìm thấy bài lab")
-    if not any(configuration.id == lab_vm_id for configuration in lab.vms):
+    configuration = next((item for item in lab.vms if item.id == lab_vm_id), None)
+    if configuration is None:
         raise HTTPException(status_code=404, detail="Cấu hình máy không thuộc bài lab")
 
     from app.services.vm_service import VMProvisionError, rollback_student_vm
@@ -876,7 +898,7 @@ def rollback_vm_session(
             student_username=current_user.username,
             lab_id=lab.id,
             lab_vm_id=lab_vm_id,
-            is_exam_mode=getattr(lab, 'is_exam_mode', False),
+            is_exam_mode=bool(lab.is_exam_mode and configuration.is_exam_submission_vm),
         )
     except VMProvisionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -930,7 +952,6 @@ def take_vm_screenshot(
 @router.post("/{lab_id}/vm-exam-submit")
 def submit_exam_from_vm(
     lab_id: int,
-    lab_vm_id: int = Query(..., gt=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_student)
 ):
@@ -947,9 +968,12 @@ def submit_exam_from_vm(
     if not lab.enable_vm:
         raise HTTPException(status_code=400, detail="This lab does not have a virtual machine enabled")
 
-    configuration = next((item for item in lab.vms if item.id == lab_vm_id), None)
-    if configuration is None:
-        raise HTTPException(status_code=404, detail="Cấu hình máy không thuộc bài lab")
+    if not lab.is_exam_mode:
+        raise HTTPException(status_code=400, detail="Bài lab chưa bật Exam Mode")
+    submission_vms = [item for item in lab.vms if item.is_exam_submission_vm]
+    if len(submission_vms) != 1:
+        raise HTTPException(status_code=400, detail="Bài lab cần chọn đúng một máy nộp bài")
+    lab_vm_id = submission_vms[0].id
 
     from app.services.vm_service import get_pve_client, _find_student_vm, backup_vm_workspace
     from app.models import Submission, AuditLog
@@ -972,7 +996,7 @@ def submit_exam_from_vm(
         )
 
     vmid = int(existing_vm["vmid"])
-    backup_file = backup_vm_workspace(vmid, current_user.username, lab.id, lab_vm_id)
+    backup_file = backup_vm_workspace(vmid, current_user.username, lab.id)
     if not backup_file or not os.path.exists(backup_file):
         raise HTTPException(
             status_code=400,
@@ -986,7 +1010,7 @@ def submit_exam_from_vm(
     sub_dir = os.path.join(settings.UPLOAD_DIR, "submissions", f"lab_{lab.id}")
     os.makedirs(sub_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    official_filename = f"Exam_Submission_{current_user.username}_vm_{lab_vm_id}_{ts}.zip"
+    official_filename = f"Exam_Submission_{current_user.username}_{ts}.zip"
     official_filepath = os.path.join(sub_dir, official_filename)
     shutil.copy2(backup_file, official_filepath)
 
@@ -1001,14 +1025,13 @@ def submit_exam_from_vm(
             if docx_candidates:
                 target_docx = docx_candidates[0]
                 docx_name = os.path.basename(target_docx)
-                extracted_docx_name = f"Report_{current_user.username}_vm_{lab_vm_id}_{ts}_{docx_name}"
+                extracted_docx_name = f"Report_{current_user.username}_{ts}_{docx_name}"
                 extracted_docx_path = os.path.join(sub_dir, extracted_docx_name)
                 with zf.open(target_docx) as source, open(extracted_docx_path, "wb") as target:
                     shutil.copyfileobj(source, target)
 
                 docx_found = {
                     "field_id": "exam_report_docx",
-                    "lab_vm_id": lab_vm_id,
                     "original_filename": docx_name,
                     "saved_filename": extracted_docx_name,
                     "filepath": extracted_docx_path,
@@ -1021,7 +1044,6 @@ def submit_exam_from_vm(
     # File zip toàn bộ workspace
     new_attachments.append({
         "field_id": "exam_workspace",
-        "lab_vm_id": lab_vm_id,
         "original_filename": official_filename,
         "saved_filename": official_filename,
         "filepath": official_filepath,
@@ -1048,7 +1070,7 @@ def submit_exam_from_vm(
         db.add(submission)
     else:
         current_attachments = list(submission.file_attachments or [])
-        merged_attachments = new_attachments + [a for a in current_attachments if not (a.get("field_id") in ("exam_report_docx", "exam_workspace") and a.get("lab_vm_id") == lab_vm_id)]
+        merged_attachments = new_attachments + [a for a in current_attachments if a.get("field_id") not in ("exam_report_docx", "exam_workspace")]
         submission.file_attachments = merged_attachments
         current_answers = dict(submission.answers or {})
         current_answers["exam_workspace"] = report_desc

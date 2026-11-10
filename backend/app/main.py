@@ -41,6 +41,7 @@ for i in range(5):
                     DROP COLUMN IF EXISTS vm_drive_files;
             """))
             conn.execute(text("ALTER TABLE classes ADD COLUMN IF NOT EXISTS semester VARCHAR DEFAULT 'unknown';"))
+            conn.execute(text("ALTER TABLE lab_vms ADD COLUMN IF NOT EXISTS is_exam_submission_vm BOOLEAN NOT NULL DEFAULT FALSE;"))
             conn.execute(text("ALTER TABLE classes ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;"))
             conn.execute(text("UPDATE classes SET semester = 'unknown' WHERE semester IS NULL;"))
             # Auto-seed semesters table from classes table if empty
