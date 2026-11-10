@@ -4,7 +4,7 @@ import { bootstrapGuacamole, connectionUrl, guacamoleBase, mirrorGuacamole } fro
 
 // A thumbnail is a canvas mirror, NOT another remote connection. Switching only
 // changes iframe position; it never changes src, parent, key or guest resolution.
-export default function GuacamoleWorkspace({ sessions, activeId, onSelect, activeFrameRef, thumbnailContainer }) {
+export default function GuacamoleWorkspace({ sessions, activeId, onSelect, activeFrameRef, thumbnailContainer, submissionVmId }) {
   const frames = useRef(new Map())
   const canvases = useRef(new Map())
   const [ready, setReady] = useState(false)
@@ -82,6 +82,7 @@ export default function GuacamoleWorkspace({ sessions, activeId, onSelect, activ
               <canvas ref={element => { if (element) canvases.current.set(vm.lab_vm_id, element); else canvases.current.delete(vm.lab_vm_id) }}
                 width={192} height={108} style={{ width: 144, height: 81, background: '#090d16' }} />
               <span style={{ fontSize: 12 }}>Machine {index + 1} · VM {vm.vmid}</span>
+              {vm.lab_vm_id === submissionVmId && <span className="badge" style={{ background: '#fdf2f8', color: '#be185d', fontSize: 10 }}>Exam submission machine</span>}
               <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{states[vm.lab_vm_id] || 'Connecting…'}</span>
             </button>
           ))}

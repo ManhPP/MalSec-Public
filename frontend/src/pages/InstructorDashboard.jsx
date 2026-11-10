@@ -240,6 +240,7 @@ export default function InstructorDashboard() {
     return {
       template_vmid: runtimeConfig?.vm?.default_template_vmid || pveTemplates[0]?.vmid || '',
       is_linked_clone: true, vm_protocol: protocol,
+      is_exam_submission_vm: false,
       vm_port: runtimeConfig?.vm?.protocol_ports?.[protocol] || 3389,
       vm_username: '', vm_password: '', cpu_cores: null, ram_mb: null,
       vm_drive_mode: 'default', vm_drive_files: []
@@ -250,6 +251,21 @@ export default function InstructorDashboard() {
     setVmDefinitions(definitions)
     setActiveVmIndex(index)
     loadVmEditor(definitions[index])
+  }
+  const selectExamSubmissionVm = (index) => {
+    // Save the open editor before changing the lab-wide submission selection.
+    setVmDefinitions(currentVmDefinitions().map((vm, position) => ({
+      ...vm, is_exam_submission_vm: position === index
+    })))
+  }
+  const changeExamMode = (enabled) => {
+    setIsExamMode(enabled)
+    if (enabled) {
+      setDisableVmCopy(true)
+      setDisableVmPaste(true)
+    } else {
+      setVmDefinitions(currentVmDefinitions().map(vm => ({ ...vm, is_exam_submission_vm: false })))
+    }
   }
   const addVmDefinition = () => {
     const definitions = [...currentVmDefinitions(), newVmDefinition()]
@@ -286,6 +302,8 @@ export default function InstructorDashboard() {
   const [previewSessions, setPreviewSessions] = useState([])
   const [previewActiveId, setPreviewActiveId] = useState(null)
   const previewVmInfo = previewSessions.find(vm => vm.lab_vm_id === previewActiveId) || null
+  const previewSubmissionVm = previewLabData?.is_exam_mode
+    ? previewLabData.vms?.find(vm => vm.is_exam_submission_vm) : null
   const previewGuacamoleUrl = previewVmInfo?.guacamole_url || ''
   const [previewAnswers, setPreviewAnswers] = useState({})
   const previewGuacRef = useRef(null)
@@ -1723,6 +1741,10 @@ export default function InstructorDashboard() {
       return
     }
     const definitions = currentVmDefinitions()
+    if (enableVm && isExamMode && definitions.filter(vm => vm.is_exam_submission_vm).length !== 1) {
+      setModalError('Please select exactly one exam submission machine!')
+      return
+    }
     if (enableVm && !definitions.length) {
       setModalError('Please configure at least one machine!')
       return
@@ -1768,14 +1790,14 @@ export default function InstructorDashboard() {
         enable_vm: enableVm,
         disable_vm_copy: disableVmCopy,
         disable_vm_paste: disableVmPaste,
-        is_exam_mode: isExamMode
+        is_exam_mode: enableVm && isExamMode
       }
       if (enableVm) {
         payload.vms = editingLab
           ? definitions.map(vm => {
               const original = editingLab.vms.find(item => item.id === vm.id)
               const update = { id: vm.id }
-              const editable = ['cpu_cores', 'ram_mb', 'vm_protocol', 'vm_port', 'vm_username', 'vm_drive_mode', 'vm_drive_files']
+              const editable = ['cpu_cores', 'ram_mb', 'vm_protocol', 'vm_port', 'vm_username', 'vm_drive_mode', 'vm_drive_files', 'is_exam_submission_vm']
               editable.forEach(key => {
                 if (JSON.stringify(vm[key]) !== JSON.stringify(original[key])) update[key] = vm[key]
               })
@@ -1783,6 +1805,10 @@ export default function InstructorDashboard() {
               return update
             }).filter(vm => Object.keys(vm).length > 1)
           : definitions.map(({ id, ...vm }) => vm)
+      } else if (editingLab) {
+        payload.vms = definitions.filter(vm => vm.is_exam_submission_vm ||
+          editingLab.vms.find(original => original.id === vm.id)?.is_exam_submission_vm)
+          .map(vm => ({ id: vm.id, is_exam_submission_vm: false }))
       }
 
       let res
@@ -6688,6 +6714,7 @@ export default function InstructorDashboard() {
                         onChange={(e) => {
                           const checked = e.target.checked
                           setEnableVm(checked)
+                          if (!checked) changeExamMode(false)
                           if (checked) {
                             const defaultProto = runtimeConfig?.vm?.default_protocol || 'rdp'
                             if (!vmProtocol) setVmProtocol(defaultProto)
@@ -6710,7 +6737,7 @@ export default function InstructorDashboard() {
                         <button type="button" key={vm.id || index} onClick={() => selectVmDefinition(index)}
                           className={`btn ${index === activeVmIndex ? 'btn-primary' : 'btn-secondary'}`}
                           style={{ padding: '6px 12px', fontSize: '12px' }}>
-                          Machine {index + 1}{vm.id ? ` (#${vm.id})` : ''}
+                          Machine {index + 1}
                         </button>
                       ))}
                       {!editingLab && <button type="button" className="btn btn-secondary" onClick={addVmDefinition} style={{ padding: '6px 12px', fontSize: '12px' }}><Plus size={13} /> Add machine</button>}
@@ -7026,14 +7053,7 @@ export default function InstructorDashboard() {
                           type="checkbox"
                           id="isExamModeCheck"
                           checked={isExamMode}
-                          onChange={(e) => {
-                            const checked = e.target.checked
-                            setIsExamMode(checked)
-                            if (checked) {
-                              setDisableVmCopy(true)
-                              setDisableVmPaste(true)
-                            }
-                          }}
+                          onChange={(e) => changeExamMode(e.target.checked)}
                           style={{ marginTop: '3px', accentColor: '#ec4899', width: '16px', height: '16px' }}
                         />
                         <div style={{ flex: 1 }}>
@@ -7048,10 +7068,25 @@ export default function InstructorDashboard() {
                             )}
                           </div>
                           <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '4px 0 0 0', lineHeight: '1.45' }}>
-                            When enabled: Students perform analysis and author their Word report (<b>.docx</b>) completely inside the VM. Automatically enforces <b>two-way clipboard isolation</b> (blocks copy from VM to host, and blocks paste from host to VM). Students can <b>Rollback clean VMs anytime without losing their report or analysis files</b> in the Exam_Workspace folder, and submit their final Word report directly from the VM for instructor speed grading.
+                            When enabled: Students author their Word report (<b>.docx</b>) in the <b>Exam_Workspace</b> of the designated submission machine. Automatically enforces <b>two-way clipboard isolation</b> across all lab machines. Every machine can be reset; only the submission machine backs up and restores its Exam_Workspace.
                           </p>
                         </div>
                       </label>
+                      {isExamMode && (
+                        <fieldset style={{ margin: '12px 0 0', padding: '12px', border: '1px solid #fbcfe8', borderRadius: '6px' }}>
+                          <legend style={{ fontSize: '12.5px', fontWeight: '600', color: '#be185d' }}>Exam submission machine</legend>
+                          <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+                            {vmDefinitions.map((vm, index) => (
+                              <label key={vm.id || index} style={{ display: 'flex', gap: '6px', alignItems: 'center', fontSize: '13px', cursor: 'pointer' }}>
+                                <input type="radio" name="examSubmissionVm" checked={Boolean(vm.is_exam_submission_vm)}
+                                  onChange={() => selectExamSubmissionVm(index)} style={{ accentColor: '#ec4899' }} />
+                                Machine {index + 1}
+                              </label>
+                            ))}
+                          </div>
+                          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '8px 0 0' }}>Select one machine to collect the exam report, regardless of which desktop the student is viewing.</p>
+                        </fieldset>
+                      )}
                     </div>
 
                     {/* Clipboard Isolation Options */}
@@ -8186,6 +8221,7 @@ export default function InstructorDashboard() {
                   <div ref={previewDesktopRef} style={{ flex: '0 0 100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: '#090d16' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px', flexWrap: 'wrap', background: '#0f172a', borderBottom: '1px solid #1e293b' }}>
                         <span style={{ fontSize: '12px', color: '#94a3b8' }}>{previewVmInfo ? `VM ${previewVmInfo.vmid}` : 'Lab desktops'}</span>
+                        {previewSubmissionVm?.id === previewActiveId && <span className="badge" style={{ background: '#fdf2f8', color: '#be185d', fontSize: '11px' }}>Exam submission machine</span>}
                         <button type="button" className="btn btn-secondary" disabled={!previewGuacamoleUrl} title="Focus selected VM"
                           onClick={() => previewGuacRef.current?.contentWindow?.focus()} style={{ padding: '4px 8px' }}><Keyboard size={13} /></button>
                         <button type="button" className="btn btn-secondary" disabled={!previewGuacamoleUrl || previewScreenshotLoading} title="Screenshot selected VM"
@@ -8244,6 +8280,7 @@ export default function InstructorDashboard() {
                       onSelect={setPreviewActiveId}
                       activeFrameRef={previewGuacRef}
                       thumbnailContainer={previewThumbnailContainer}
+                      submissionVmId={previewSubmissionVm?.id}
                     />
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1 }}>

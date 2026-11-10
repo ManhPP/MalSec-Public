@@ -364,6 +364,10 @@ export default function StudentDashboard() {
   const [activeLabVmId, setActiveLabVmId] = useState(null)
   const vmInfo = vmSessions.find(vm => vm.lab_vm_id === activeLabVmId) || null
   const guacamoleUrl = vmInfo?.guacamole_url || ''
+  const examSubmissionVm = selectedLab?.is_exam_mode
+    ? selectedLab.vms?.find(vm => vm.is_exam_submission_vm) : null
+  const examSubmissionLabel = examSubmissionVm
+    ? `Machine ${selectedLab.vms.findIndex(vm => vm.id === examSubmissionVm.id) + 1}` : 'Not configured'
   const [vmLoading, setVmLoading] = useState(false)
   const [vmError, setVmError] = useState('')
   const [screenshotLoading, setScreenshotLoading] = useState(false)
@@ -493,11 +497,34 @@ export default function StudentDashboard() {
     }
   }
 
+  const refreshSubmissionLab = async () => {
+    // A teacher may have changed the source machine while this lab was open.
+    const res = await fetch(`/api/labs/${selectedLab.id}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('malsec_token')}` }
+    })
+    const lab = await res.json()
+    if (!res.ok) throw new Error(lab.detail || 'Could not refresh the lab submission settings')
+    setSelectedLab(current => current?.id === lab.id ? { ...current, ...lab } : current)
+    if (lab.is_exam_mode && (lab.vms || []).filter(vm => vm.is_exam_submission_vm).length !== 1) {
+      throw new Error('This exam does not have exactly one submission machine configured. Please contact your instructor.')
+    }
+    return lab
+  }
+  const submissionMachineLabel = lab => `Machine ${(lab.vms || []).findIndex(vm => vm.is_exam_submission_vm) + 1}`
+
   const handleSubmitExamFromVm = async () => {
-    if (!selectedLab || !guacamoleUrl) return
+    if (!selectedLab) return
+    let lab
+    try {
+      lab = await refreshSubmissionLab()
+      if (!lab.is_exam_mode) throw new Error('Exam Mode is no longer enabled. Please use the regular lab submission form.')
+    } catch (err) {
+      alert('Exam Submission Error: ' + err.message)
+      return
+    }
     const confirmSubmit = window.confirm(
-      'Are you sure you want to submit your exam report?\n\n' +
-      'The system will automatically scan and collect your Word report (.docx) and files from your Desktop\'s "Exam_Workspace" folder inside the VM and submit them to your instructor.'
+      `Submit your exam report from ${submissionMachineLabel(lab)}?\n\n` +
+      'The system will collect the Word report (.docx) and files from that machine\'s Desktop "Exam_Workspace", regardless of the desktop you are viewing.'
     )
     if (!confirmSubmit) return
 
@@ -505,7 +532,7 @@ export default function StudentDashboard() {
     setScreenshotNotice('')
     const token = localStorage.getItem('malsec_token')
     try {
-      const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit?lab_vm_id=${activeLabVmId}`, {
+      const res = await fetch(`/api/labs/${lab.id}/vm-exam-submit`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       })
@@ -972,8 +999,15 @@ export default function StudentDashboard() {
 
   // Final submission handler
   const handleSubmitSubmission = async () => {
+    let submissionLab
+    try {
+      submissionLab = await refreshSubmissionLab()
+    } catch (err) {
+      setError(err.message)
+      return
+    }
     // Check required fields
-    const missingFields = (selectedLab.form_fields || []).filter(
+    const missingFields = (submissionLab.form_fields || []).filter(
       f => f.required && !answers[f.id]
     )
 
@@ -984,23 +1018,26 @@ export default function StudentDashboard() {
 
     // Confirm late penalty before final submission
     const now = new Date()
-    let deadline = parseVietnamDate(selectedLab.deadline)
+    let deadline = parseVietnamDate(submissionLab.deadline)
     
     // Check personal exception extension
-    const extStr = (selectedLab.individual_extensions || {})[user.username]
+    const extStr = (submissionLab.individual_extensions || {})[user.username]
     if (extStr) {
       deadline = parseVietnamDate(extStr)
     }
 
     let warningText = 'Are you sure you want to submit your final report?'
     if (deadline && now > deadline) {
-      const policy = selectedLab.late_policy || {}
+      const policy = submissionLab.late_policy || {}
       const penalty = policy.penalty_per_hour_percent || 0
       const hoursLate = (now - deadline) / 3600000.0
       const calculated = Math.min(hoursLate * penalty, policy.max_penalty_percent || 30)
       warningText = `WARNING: Submission is overdue! Submitting now incurs a late penalty of ${calculated.toFixed(1)}%. Do you still want to proceed?`
     }
 
+    if (submissionLab.is_exam_mode) {
+      warningText += `\n\nThe report will be collected from ${submissionMachineLabel(submissionLab)} only. Save your files in its Desktop Exam_Workspace. The selected desktop does not change the submission source.`
+    }
     if (!confirm(warningText)) return
 
     setActionLoading(true)
@@ -1009,10 +1046,9 @@ export default function StudentDashboard() {
     const token = localStorage.getItem('malsec_token')
 
     try {
-      if (selectedLab?.is_exam_mode) {
-        if (!vmInfo) throw new Error('Select a connected lab machine before submitting the exam')
+      if (submissionLab.is_exam_mode) {
         // If Exam Mode is active, collect Word docx / workspace from VM Desktop
-        const res = await fetch(`/api/labs/${selectedLab.id}/vm-exam-submit?lab_vm_id=${activeLabVmId}`, {
+        const res = await fetch(`/api/labs/${submissionLab.id}/vm-exam-submit`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -2635,9 +2671,10 @@ export default function StudentDashboard() {
                   
                   {/* RDP Window Top bar */}
                   <div className="vm-header-bar" style={isVmFullscreen ? { background: '#0f172a', borderBottom: '1px solid #334155' } : {}}>
-                    <div className="vm-title">
+                    <div className="vm-title" style={{ minWidth: 0 }}>
                       <Monitor size={15} />
-                      <span>{vmInfo ? `Lab VM ${vmInfo.vmid} — ${vmInfo.protocol.toUpperCase()} — ${vmInfo.ip_address}` : vmOs} {isVmFullscreen && '(Full Screen)'}</span>
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{vmInfo ? `Lab VM ${vmInfo.vmid} — ${vmInfo.protocol.toUpperCase()} — ${vmInfo.ip_address}` : vmOs} {isVmFullscreen && '(Full Screen)'}</span>
+                      {examSubmissionVm?.id === activeLabVmId && <span className="badge" style={{ background: '#fdf2f8', color: '#be185d', fontSize: '11px', whiteSpace: 'nowrap', flexShrink: 0 }}>Exam submission machine</span>}
                     </div>
                     <div className="vm-actions" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <button 
@@ -2703,7 +2740,9 @@ export default function StudentDashboard() {
                         className="btn-icon" 
                         disabled={vmLoading}
                         style={{ width: '30px', height: '30px', background: '#dc2626', border: '1px solid #ef4444', color: '#ffffff' }}
-                        title="Rollback Clean VM (Revert to initial state on Proxmox while preserving Exam_Workspace)"
+                        title={selectedLab.is_exam_mode && examSubmissionVm?.id === activeLabVmId
+                          ? 'Reset this VM to clean state while preserving its Exam_Workspace'
+                          : 'Reset this VM to clean state'}
                       >
                         <RotateCcw size={14} />
                       </button>
@@ -2753,6 +2792,7 @@ export default function StudentDashboard() {
                         onSelect={setActiveLabVmId}
                         activeFrameRef={guacamoleFrameRef}
                         thumbnailContainer={vmThumbnailContainer}
+                        submissionVmId={examSubmissionVm?.id}
                       />
                     ) : (
                       <div style={{ textAlign: 'center', zIndex: 1, padding: '24px' }}>
@@ -2924,7 +2964,7 @@ export default function StudentDashboard() {
                     </h4>
                   </div>
                   <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.55', margin: '0 0 12px 0' }}>
-                    Write your report in Microsoft Word (<b>.docx</b>) and save it inside the <b>Exam_Workspace</b> folder on your VM Desktop. Click <b>"Submit Final Report"</b> on the top bar to finish. Clean VM rollbacks safely preserve your work.
+                    Submission machine: <b>{examSubmissionLabel}</b>. Write your report in Microsoft Word (<b>.docx</b>) and save it inside the <b>Exam_Workspace</b> folder on that machine's Desktop. Click <b>"Submit Final Report"</b> on the top bar to finish, regardless of the desktop you are viewing. Every machine can be reset; only the designated submission machine backs up and restores its Exam_Workspace.
                   </p>
 
                   {/* If student has already submitted, show current attached files */}
@@ -2982,7 +3022,7 @@ export default function StudentDashboard() {
                   {selectedLab.is_exam_mode ? 'Exam Report Submission' : 'Lab Report Submission'}
                 </h3>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '12.5px' }}>
-                  {selectedLab.is_exam_mode ? 'Author your report in Microsoft Word inside the VM Desktop.' : 'Answer questions and attach evidence files below.'}
+                  {selectedLab.is_exam_mode ? `Author your report in Microsoft Word inside ${examSubmissionLabel}'s Desktop Exam_Workspace.` : 'Answer questions and attach evidence files below.'}
                 </p>
               </div>
 
